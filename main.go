@@ -44,8 +44,21 @@ func (tree *Tree) insert(leaf []byte) error {
 	return nil
 }
 
-func (tree *Tree) root() ([]byte, error) {
-	return nil, nil
+// Calculate the root hash of the tree
+func (tree *Tree) root() []byte {
+	if tree.count == 0 {
+		return z32
+	}
+
+	i := tree.nonZeroDepth()
+	current := tree.subtreeRoot(i, 0)
+
+	// For the rest of the tree, hash the current node with sibling zero hashes until we reach the root
+	for ; i < treeDepth; i++ {
+		current = crypto.Keccak256(current, zeroDigests[i])
+	}
+
+	return current
 }
 
 // Find log2 of the tree's count. This is the depth of the non-zero subtree.

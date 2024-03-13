@@ -164,12 +164,12 @@ func TestProof(t *testing.T) {
 	for _, test := range tests {
 		t.Logf("Testing proof for index %v, expected root %s", test.index, test.expectedRoot)
 
-		tree := Tree{}
-
 		if len(test.expectedProof) != 32 {
 			t.Errorf("Expected proof length is not 32")
 		}
 
+		// Set up the tree
+		tree := Tree{}
 		for _, l := range test.leaves {
 			decoded, err := hex.DecodeString(l)
 			if err != nil {
@@ -178,6 +178,13 @@ func TestProof(t *testing.T) {
 			tree.insert(decoded)
 		}
 
+		// Check the root
+		root := hex.EncodeToString(tree.root())
+		if root != test.expectedRoot {
+			t.Errorf("Root did not match expected root (%s != %s)", root, test.expectedRoot)
+		}
+
+		// Check the proof
 		proof, err := tree.getProof(test.index)
 		if err != nil {
 			t.Errorf("Error getting proof: %v", err)
