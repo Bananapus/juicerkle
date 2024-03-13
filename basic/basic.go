@@ -8,12 +8,6 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
-/*type Leaf struct {
-	Beneficiary         string // address
-	ProjectTokenAmount  string // uint256
-	TerminalTokenAmount string // uint256
-}*/
-
 const (
 	treeDepth = 32
 	maxLeaves = 1<<treeDepth - 1 // 2^TREE_DEPTH - 1
@@ -40,8 +34,6 @@ func init() {
 
 	z32 = crypto.Keccak256(zeroDigests[treeDepth-1], zeroDigests[treeDepth-1])
 }
-
-func main() {}
 
 // TODO: Accept a Leaf parameter and hash in here
 func (tree *Tree) insert(node []byte) error {
@@ -111,7 +103,6 @@ func (tree *Tree) root() []byte {
 	return current
 }
 
-// TODO: Accept a leaf parameter
 func VerifyProof(index uint32, proof [treeDepth][]byte, leaf []byte, expectedRoot []byte) (bool, error) {
 	latestDigest := leaf
 
@@ -166,30 +157,4 @@ func VerifyProof(index uint32, proof [treeDepth][]byte, leaf []byte, expectedRoo
 		return false, errors.New("proof did not match expected root")
 	}
 	return true, nil
-}
-
-func (tree *Tree) GetProof(index uint64) (proof [treeDepth][]byte, err error) {
-
-	// Initialize the siblings to zero hashes at each level
-	siblings := make([][]byte, treeDepth-1)
-	copy(siblings, zeroDigests[:treeDepth])
-
-	// Iterate down (from the root) to get zero sibling nodes. All nodes above the calculated index are zero hashes.
-	i := 0
-	n := tree.count
-	for n != 0 {
-		n >>= 1
-		i++
-	}
-	startIndex := treeDepth - i
-
-	// Find siblings at remaining depths
-	for i := startIndex; i < treeDepth-1; i++ {
-	}
-
-	if debugging {
-		fmt.Println("Start index:", startIndex)
-	}
-
-	return
 }
