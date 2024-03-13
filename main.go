@@ -57,12 +57,13 @@ func (tree *Tree) getProof(index int) (proof [][]byte, err error) {
 
 	proof = make([][]byte, treeDepth)
 	// Copy the zero hashes into the proof. All siblings above the non-zero subtree are zero hashes.
-	copy(proof, zeroDigests[i:])
+	copy(proof[i:], zeroDigests[i:])
 
 	// Find siblings at remaining depths moving up from the bottom of the tree
 	for depth := 0; depth < i; depth++ {
 		leavesToHash := 1 << depth            // 2 to the power of depth
-		startingIndex := index | (1 << depth) // starting index of the leaves to hash
+		startingIndex := index ^ (1 << depth) // starting index of the leaves to hash
+		// TODO: Fix starting index (this is wrong)
 
 		// If we're outside the non-zero subtree, we can use the zero hash.
 		if startingIndex >= tree.count>>depth { // Bit shift equivalent to dividing by 2^depth
