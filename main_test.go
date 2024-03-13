@@ -5,6 +5,41 @@ import (
 	"testing"
 )
 
+// Test that the starting leaf for subtree hashing is calculated correctly.
+func TestStartingIndex(t *testing.T) {
+	var tests = []struct {
+		index                   int
+		expectedStartingIndices []int
+	}{
+		{
+			index:                   0,
+			expectedStartingIndices: []int{1, 2, 4, 8, 16, 32},
+		},
+		{
+			index:                   1,
+			expectedStartingIndices: []int{0, 2, 4, 8, 16, 32},
+		},
+		{
+			index:                   5,
+			expectedStartingIndices: []int{4, 6, 0, 8, 16, 32},
+		},
+		{
+			index:                   16,
+			expectedStartingIndices: []int{17, 18, 20, 24, 0, 32},
+		},
+	}
+
+	for _, test := range tests {
+		for depth := 0; depth < len(test.expectedStartingIndices); depth++ {
+			// The line being tested.
+			startingIndex := (test.index/(1<<depth) ^ 1) * (1 << depth)
+			if startingIndex != test.expectedStartingIndices[depth] {
+				t.Errorf("For index %v, expected starting index %v, but got %v", test.index, test.expectedStartingIndices[depth], startingIndex)
+			}
+		}
+	}
+}
+
 func TestProof(t *testing.T) {
 	seventeenLeaves := []string{
 		"8493eba7305be4ad7134adaf22748ebcc0db40056d78786e94ed35bcdeb3064d",
@@ -82,7 +117,7 @@ func TestProof(t *testing.T) {
 			leaves: []string{"d84691a17cd171b6bb464b0161f2b0c7773f5b73a9b67962e7fba4f478cb9c80", "7ee645549845dbdb0a5ca8460b206e0340b07c79674d83ba91013e124c219ffc", "90fbd9ec3d536c70a2c30ac2f8bdfbc16455819d6d36bdcb4d76efa8049dfe3c"},
 			index:  1,
 			expectedProof: []string{
-				"d84691a17cd171b6bb464b0161f2b0c7773f5b73a9b67962e7fba4f478cb9c80", "ad3228b676f7d3cd4284a5443f17f1962b36e491b30a40b2405849e597ba5fb5",
+				"d84691a17cd171b6bb464b0161f2b0c7773f5b73a9b67962e7fba4f478cb9c80", "2d1fa8e18e0e2f8fee037dd3d52daa2ff9e61aefe194e5b0877b7c9e0e8c8817",
 				"b4c11951957c6f8f642c4af61cd6b24640fec6dc7fc607ee8206a99e92410d30", "21ddb9a356815c3fac1026b6dec5df3124afbadb485c9ba5a3e3398a04b7ba85",
 				"e58769b32a1beaf1ea27375a44095a0d1fb664ce2dd358e7fcbfb78c26a19344", "0eb01ebfc9ed27500cd4dfc979272d1f0913cc9f66540d7e8005811109e1cf2d",
 				"887c22bd8750d34016ac3c66b5ff102dacdd73f6b014e710b51e8022af9a1968", "ffd70157e48063fc33c97a050f7f640233bf646cc98d9524c6b92bcf3ab56f83",
@@ -99,11 +134,13 @@ func TestProof(t *testing.T) {
 				"662ee4dd2dd7b2bc707961b1e646c4047669dcb6584f0d8d770daf5d7e7deb2e", "388ab20e2573d171a88108e79d820e98f26c0b84aa8b2f4aa4968dbb818ea322",
 				"93237c50ba75ee485f4c22adf2f741400bdf8d6a9cc7df7ecae576221665d735", "8448818bb4ae4562849e949e17ac16e0be16688e156b5cf15e098c627c0056a9",
 			},
-			expectedRoot: "5745a6ef34a135df1d440dcc803b02db6d3656c729d23776e5cd6ec8f3637325",
+			expectedRoot: "70352a98d1692a499bcf052869fa679b7862630764f5e4a856ea5dc7e0c7f99c",
 		},
 	}
 
 	for _, test := range tests {
+		t.Logf("Testing proof for index %v, expected root %s", test.index, test.expectedRoot)
+
 		tree := Tree{}
 
 		if len(test.expectedProof) != 32 {
@@ -125,11 +162,8 @@ func TestProof(t *testing.T) {
 
 		for i, p := range proof {
 			if hex.EncodeToString(p) != test.expectedProof[i] {
-				t.Errorf("For index %v, expected root %s:", test.index, test.expectedRoot)
 				t.Errorf("Proof %d did not match expected proof (%v != %v)", i, hex.EncodeToString(p), test.expectedProof[i])
 			}
-			// t.Logf("%d: %v (calculated proof)", i, hex.EncodeToString(p))
-			// t.Logf("%d: %v (expected proof)", i, test.expectedProof[i])
 		}
 	}
 }

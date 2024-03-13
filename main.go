@@ -61,12 +61,11 @@ func (tree *Tree) getProof(index int) (proof [][]byte, err error) {
 
 	// Find siblings at remaining depths moving up from the bottom of the tree
 	for depth := 0; depth < i; depth++ {
-		leavesToHash := 1 << depth            // 2 to the power of depth
-		startingIndex := index ^ (1 << depth) // starting index of the leaves to hash
-		// TODO: Fix starting index (this is wrong)
+		leavesToHash := 1 << depth                             // 2 to the power of depth
+		startingIndex := (index/(1<<depth) ^ 1) * (1 << depth) // starting index of the leaves to hash
 
 		// If we're outside the non-zero subtree, we can use the zero hash.
-		if startingIndex >= tree.count>>depth { // Bit shift equivalent to dividing by 2^depth
+		if startingIndex > tree.count {
 			proof[depth] = zeroDigests[depth]
 			continue
 		}
@@ -98,17 +97,13 @@ func (tree *Tree) getProof(index int) (proof [][]byte, err error) {
 			toHash = nextLayer
 		}
 
-		// There should only be one hash left in toHash
-		proof[depth] = toHash[0]
+		// There should only be one hash left in toHash. If it's empty, use the zero hash.
+		if len(toHash) == 0 {
+			proof[depth] = zeroDigests[depth]
+		} else {
+			proof[depth] = toHash[0]
+		}
 	}
 
 	return
-}
-
-func (tree *Tree) subtreeHash(layer, index int) []byte {
-	if layer == 0 {
-		return tree.leaves[index]
-	}
-
-	return nil
 }
