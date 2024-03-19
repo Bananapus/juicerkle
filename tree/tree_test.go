@@ -63,7 +63,7 @@ func TestProof(t *testing.T) {
 
 	var tests = []struct {
 		leaves        []string
-		index         int
+		index         uint
 		expectedProof []string
 		expectedRoot  string
 	}{

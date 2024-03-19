@@ -28,7 +28,7 @@ func initDb() error {
 		return err
 	}
 
-	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS tree (
+	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS trees (
 		chain_id INTEGER,
 		contract_address TEXT,
 		token_address TEXT,	

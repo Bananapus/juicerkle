@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"juicerkle/tree"
 	"log"
+	"math/big"
 	"net/http"
 	"time"
 
@@ -76,17 +79,11 @@ func main() {
 	http.ListenAndServe(":8080", nil)
 }
 
-/*type BPLeaf struct {
-	Index               *big.Int       `json:"index"`
-	Beneficiary         common.Address `json:"beneficiary"`
-	ProjectTokenAmount  *big.Int       `json:"projectTokenAmount"`
-	TerminalTokenAmount *big.Int       `json:"terminalTokenAmount"`
-}*/
-
 type ProofRequest struct {
-	ChainId int    `json:"chainId"` // The chain ID of the sucker contract
-	Sucker  string `json:"sucker"`  // The sucker contract address
-	Leaf    BPLeaf `json:"leaf"`    // The leaf to prove on the sucker contract
+	ChainId int            `json:"chainId"` // The chain ID of the sucker contract
+	Sucker  common.Address `json:"sucker"`  // The sucker contract address
+	Token   common.Address `json:"token"`   // The address of the token being claimed
+	Leaf    BPLeaf         `json:"leaf"`    // The leaf to prove on the sucker contract
 }
 
 func proof(w http.ResponseWriter, req *http.Request) {
@@ -98,12 +95,17 @@ func proof(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	if toProve.Leaf.Index.Cmp(big.NewInt(0)) < 0 || toProve.Leaf.Index.Cmp(big.NewInt(1<<32)) >= 0 {
+		http.Error(w, "Invalid leaf index", http.StatusBadRequest)
+		return
+	}
+
 	// Set up cancellation context
 	ctx, cancel := context.WithTimeout(req.Context(), 15*time.Second)
 	defer cancel()
 
-	// Set up channel to receive the proof
-	proof := make(chan [][]byte)
+	// Set up channel to receive the proofCh
+	proofCh := make(chan [][]byte)
 
 	// Calculate the proof off of the main thread
 	go func() {
@@ -114,10 +116,17 @@ func proof(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
-		localSucker, err := NewBPSucker(common.HexToAddress(toProve.Sucker), client)
+		localSucker, err := NewBPSucker(toProve.Sucker, client)
 		if err != nil {
 			log.Printf("Failed to instantiate the sucker contract: %v\n", err)
 			http.Error(w, "Failed to instantiate the sucker contract", http.StatusInternalServerError)
+			return
+		}
+
+		tree, err := localSucker.Inbox(&bind.CallOpts{Context: ctx}, toProve.Token)
+		if err != nil {
+			log.Printf("Failed to get tree: %v\n", err)
+			http.Error(w, "Failed to get tree", http.StatusInternalServerError)
 			return
 		}
 
@@ -127,7 +136,28 @@ func proof(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
-		proof <- nil
+		peerClient, ok := clients[peerChainId]
+		if !ok {
+			log.Printf("Peer chain %d not supported\n", peerChainId)
+			http.Error(w, "Peer chain not supported", http.StatusBadRequest)
+			return
+		}
+
+		remoteSucker, err := NewBPSucker(peerContractAddr, peerClient)
+		if err != nil {
+			log.Printf("Failed to instantiate the peer sucker contract: %v\n", err)
+			http.Error(w, "Failed to instantiate the peer sucker contract", http.StatusInternalServerError)
+			return
+		}
+
+		proof, err := suckerProof(remoteSucker, toProve.Leaf, ctx)
+		if err != nil {
+			log.Printf("Failed to get proof: %v\n", err)
+			http.Error(w, "Failed to get proof", http.StatusInternalServerError)
+			return
+		}
+
+		proofCh <- proof
 	}()
 
 	// Wait for the proof or a cancellation
@@ -136,7 +166,7 @@ func proof(w http.ResponseWriter, req *http.Request) {
 		log.Printf("Request cancelled: %v\n", ctx.Err())
 		http.Error(w, "Request cancelled", http.StatusRequestTimeout)
 		return
-	case p := <-proof:
+	case p := <-proofCh:
 		b, err := json.Marshal(p)
 		if err != nil {
 			log.Printf("Failed to marshal proof: %v\n", err)
@@ -168,21 +198,18 @@ func (leaf BPLeaf) hash() (common.Hash, error) {
 }
 
 // Get the peer chain ID and contract address for a sucker
-func peer(suckerChainId int, suckerAddress string, localSucker *BPSucker, ctx context.Context) (chainId, common.Address, error) {
+func peer(suckerChainId chainId, suckerAddress common.Address, localSucker *BPSucker, ctx context.Context) (chainId, common.Address, error) {
 	var dbPeerChainId int
 	var dbPeerContractAddr string
 
-	peerCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
 	// Check the db for the sucker contract's peer
-	err := db.QueryRowContext(peerCtx, `SELECT peer_chain_id, peer_contract_address FROM suckers
+	err := db.QueryRowContext(ctx, `SELECT peer_chain_id, peer_contract_address FROM suckers
 		WHERE chain_id = ? AND contract_address = ?`,
-		suckerChainId, suckerAddress).Scan(&dbPeerChainId, &dbPeerContractAddr)
+		suckerChainId, suckerAddress.String()).Scan(&dbPeerChainId, &dbPeerContractAddr)
 
 	select {
-	case <-peerCtx.Done():
-		log.Printf("Request cancelled: %v\n", peerCtx.Err())
+	case <-ctx.Done():
+		log.Printf("Request cancelled: %v\n", ctx.Err())
 		return 0, common.Address{}, fmt.Errorf("request cancelled")
 	default:
 		// Continue
@@ -197,7 +224,7 @@ func peer(suckerChainId int, suckerAddress string, localSucker *BPSucker, ctx co
 		// TODO: Read the peer chain ID from the sucker. Mocking for now
 		peerChainId := chainId(1)
 
-		peerContractAddr, err := localSucker.PEER(&bind.CallOpts{Context: peerCtx})
+		peerContractAddr, err := localSucker.PEER(&bind.CallOpts{Context: ctx})
 		if err != nil {
 			log.Printf("Failed to get peer from sucker: %v\n", err)
 			return 0, common.Address{}, fmt.Errorf("failed to get peer from sucker")
@@ -211,6 +238,81 @@ func peer(suckerChainId int, suckerAddress string, localSucker *BPSucker, ctx co
 
 		return peerChainId, peerContractAddr, nil
 	} else {
+		// TODO: Should we remove this case and read from the blockchain if the db has an error?
 		return 0, common.Address{}, fmt.Errorf("failed to query database")
 	}
+}
+
+func dbProof(leaf BPLeaf, root common.Hash, suckerChainId chainId, suckerAddress common.Address, tokenAddress common.Address, ctx context.Context) ([][]byte, bool, error) {
+	var dbRoot string
+	var dbCount uint
+
+	err := db.QueryRowContext(ctx, `SELECT current_root, count FROM trees
+		WHERE chain_id = ? AND contract_address = ? AND token_address = ?`,
+		suckerChainId, suckerAddress.String(), tokenAddress.String()).
+		Scan(&dbRoot, &dbCount)
+
+	// TODO: this probably doesn't matter that much
+	select {
+	case <-ctx.Done():
+		log.Printf("Request cancelled: %v\n", ctx.Err())
+		return nil, false, fmt.Errorf("request cancelled")
+	default:
+		// Continue
+	}
+
+	if err != nil && err != sql.ErrNoRows {
+		return nil, false, fmt.Errorf("failed to query database")
+	}
+
+	// If no rows were found, or the roots don't match, we need to update the database.
+	if err == sql.ErrNoRows || err == nil && dbRoot != root.String() {
+		// TODO: update the database
+	}
+
+	// Remaining case: err == nil and roots match
+
+	rows, err := db.QueryContext(ctx, `SELECT leaf_hash FROM leaves
+		WHERE chain_id = ? AND contract_address = ? AND token_address = ?`,
+		suckerChainId, suckerAddress.String(), tokenAddress.String())
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to query database")
+	}
+
+	leaves := make([][]byte, 0, dbCount)
+	for rows.Next() {
+		var leafHash string
+		err := rows.Scan(&leafHash)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to scan leaf hash %s: %v", leafHash, err)
+		}
+
+		b, err := hex.DecodeString(leafHash)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to decode leaf hash %s: %v", leafHash, err)
+		}
+
+		leaves = append(leaves, b)
+	}
+
+	t := tree.NewTree(leaves)
+	treeRoot := t.Root()
+
+	// Sanity check the tree root
+	if hex.EncodeToString(treeRoot) != root.String() {
+		// TODO: update the database
+		return nil, false, fmt.Errorf("calculated tree root does not match reported tree root in db")
+	}
+
+	// Bounds are checked in the proof function
+	p, err := t.Proof(uint(leaf.Index.Uint64()))
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to get proof: %v", err)
+	}
+
+	return p, true, nil
+}
+
+func suckerProof(remoteSucker *BPSucker, leaf BPLeaf, ctx context.Context) ([][]byte, error) {
+	return nil, nil
 }

@@ -35,6 +35,10 @@ func init() {
 	z32 = crypto.Keccak256(zeroDigests[treeDepth-1], zeroDigests[treeDepth-1])
 }
 
+func NewTree(leaves [][]byte) *Tree {
+	return &Tree{leaves: leaves, count: uint(len(leaves))}
+}
+
 func (tree *Tree) Insert(leaf []byte) error {
 	if tree.count >= maxLeaves {
 		return errTreeIsFull
@@ -116,7 +120,7 @@ func (tree *Tree) subtreeRoot(depth int, startingIndex uint) []byte {
 	return toHash[0]
 }
 
-func (tree *Tree) Proof(index int) (proof [][]byte, err error) {
+func (tree *Tree) Proof(index uint) (proof [][]byte, err error) {
 	i := tree.nonZeroDepth()
 
 	if i > 31 {
@@ -136,7 +140,7 @@ func (tree *Tree) Proof(index int) (proof [][]byte, err error) {
 	return
 }
 
-func VerifyProof(index int, proof [][]byte, leaf []byte, expectedRoot []byte) (bool, error) {
+func VerifyProof(index uint, proof [][]byte, leaf []byte, expectedRoot []byte) (bool, error) {
 	latestDigest := leaf
 
 	for i := 0; i < treeDepth; i++ {
