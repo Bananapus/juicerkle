@@ -8,31 +8,31 @@ import (
 // Test that the starting leaf for subtree hashing is calculated correctly.
 func TestStartingIndex(t *testing.T) {
 	var tests = []struct {
-		index                   int
-		expectedStartingIndices []int
+		index                   uint
+		expectedStartingIndices []uint
 	}{
 		{
 			index:                   0,
-			expectedStartingIndices: []int{1, 2, 4, 8, 16, 32},
+			expectedStartingIndices: []uint{1, 2, 4, 8, 16, 32},
 		},
 		{
 			index:                   1,
-			expectedStartingIndices: []int{0, 2, 4, 8, 16, 32},
+			expectedStartingIndices: []uint{0, 2, 4, 8, 16, 32},
 		},
 		{
 			index:                   5,
-			expectedStartingIndices: []int{4, 6, 0, 8, 16, 32},
+			expectedStartingIndices: []uint{4, 6, 0, 8, 16, 32},
 		},
 		{
 			index:                   16,
-			expectedStartingIndices: []int{17, 18, 20, 24, 0, 32},
+			expectedStartingIndices: []uint{17, 18, 20, 24, 0, 32},
 		},
 	}
 
 	for _, test := range tests {
 		for depth := 0; depth < len(test.expectedStartingIndices); depth++ {
 			// The line being tested.
-			startingIndex := (test.index/(1<<depth) ^ 1) * (1 << depth)
+			startingIndex := uint((test.index/(1<<depth) ^ 1) * (1 << depth))
 			if startingIndex != test.expectedStartingIndices[depth] {
 				t.Errorf("For index %v, expected starting index %v, but got %v", test.index, test.expectedStartingIndices[depth], startingIndex)
 			}

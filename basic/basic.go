@@ -1,3 +1,6 @@
+// This is a basic incremental merkle tree implementation.
+// I used this to learn about how merkle trees work.
+// This might be useful for testing later on.
 package basic
 
 import (

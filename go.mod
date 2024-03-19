@@ -2,7 +2,10 @@ module juicerkle
 
 go 1.22.0
 
-require github.com/ethereum/go-ethereum v1.13.13
+require (
+	github.com/ethereum/go-ethereum v1.13.13
+	github.com/mattn/go-sqlite3 v1.14.22
+)
 
 require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
@@ -15,7 +18,9 @@ require (
 	github.com/deckarep/golang-set/v2 v2.1.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/ethereum/c-kzg-4844 v0.4.0 // indirect
+	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
+	github.com/google/uuid v1.3.0 // indirect
 	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/holiman/uint256 v1.2.4 // indirect
 	github.com/mmcloughlin/addchain v0.4.0 // indirect

@@ -12,9 +12,11 @@ const (
 	maxLeaves = 1<<treeDepth - 1 // 2^TREE_DEPTH - 1
 )
 
+// A binary tree, represented by the bottom layer as a slice of leaves and the current number of leaves.
 type Tree struct {
 	leaves [][]byte // The leaves, in order of insertion.
-	count  int      // The current number of leaves in the tree.
+	count  uint     // The current number of leaves in the tree.
+	// Count must be a uint to allow for a maximum of 2^32-1 leaves on 32-bit systems.
 }
 
 var zeroDigests [treeDepth][]byte // hash values at different heights for a binary tree with leaves equal to 0 (keccak256)
@@ -73,13 +75,13 @@ func (tree *Tree) nonZeroDepth() int {
 // Get the root of the subtree at the given depth and starting index.
 // depth is the depth of the subtree root (0 is the bottom of the tree, and 31 is the top).
 // startingIndex is the index of the first leaf in the subtree (on the left at depth 0).
-func (tree *Tree) subtreeRoot(depth, startingIndex int) []byte {
+func (tree *Tree) subtreeRoot(depth int, startingIndex uint) []byte {
 	// If we would start outside the defined sub-tree, return the zero hash for that depth.
 	if startingIndex > tree.count {
 		return zeroDigests[depth]
 	}
 
-	leavesToHash := 1 << depth // 2 to the power of depth
+	leavesToHash := uint(1 << depth) // 2 to the power of depth
 	toHash := tree.leaves[startingIndex:min(startingIndex+leavesToHash, tree.count)]
 
 	// If there's nothing to hash, return the zero hash for that depth.
@@ -127,7 +129,7 @@ func (tree *Tree) Proof(index int) (proof [][]byte, err error) {
 
 	// Find siblings at remaining depths moving up from the bottom of the tree
 	for depth := 0; depth < i; depth++ {
-		startingIndex := (index/(1<<depth) ^ 1) * (1 << depth) // starting index of the leaves to hash
+		startingIndex := uint((index/(1<<depth) ^ 1) * (1 << depth)) // starting index of the leaves to hash
 		proof[depth] = tree.subtreeRoot(depth, startingIndex)
 	}
 
