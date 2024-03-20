@@ -18,7 +18,7 @@ func initDb() error {
 		return err
 	}
 
-	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS suckers (
+	/*if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS suckers (
 		chain_id INTEGER,
 		contract_address TEXT,
 		peer_chain_id INTEGER,
@@ -26,8 +26,9 @@ func initDb() error {
 		PRIMARY KEY (chain_id, contract_address)
 	);`); err != nil {
 		return err
-	}
+	}*/
 
+	// These are the inbox trees for each sucker. The leaves are read from the peer sucker.
 	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS trees (
 		chain_id INTEGER,
 		contract_address TEXT,
@@ -53,8 +54,7 @@ func initDb() error {
 	}
 
 	if _, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_leaves_chain_contract_token 
-		ON leaves (chain_id, contract_address, token_address
-	);`); err != nil {
+		ON leaves (chain_id, contract_address, token_address);`); err != nil {
 		return err
 	}
 

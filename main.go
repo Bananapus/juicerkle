@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -24,9 +26,14 @@ type chainId int
 
 const (
 	mainnet  chainId = 1
-	optimism         = 10
-	base             = 8453
-	arbitrum         = 42161
+	optimism chainId = 10
+	base     chainId = 8453
+	arbitrum chainId = 42161
+)
+
+const (
+	sepolia   chainId = 11155111
+	opSepolia chainId = 11155420
 )
 
 // Map of chainId to ethclient.Client
@@ -43,9 +50,19 @@ var networks = []struct {
 		rpcUrl:  "https://rpc.ankr.com/eth",
 	},
 	{
+		name:    "sepolia",
+		chainId: sepolia,
+		rpcUrl:  "https://rpc.sepolia.org",
+	},
+	{
 		name:    "optimism",
 		chainId: optimism,
 		rpcUrl:  "https://rpc.ankr.com/optimism",
+	},
+	{
+		name:    "optimism sepolia",
+		chainId: opSepolia,
+		rpcUrl:  "https://sepolia.optimism.io",
 	},
 	{
 		name:    "base",
@@ -56,6 +73,20 @@ var networks = []struct {
 		name:    "arbitrum",
 		chainId: arbitrum,
 		rpcUrl:  "https://rpc.ankr.com/arbitrum",
+	},
+}
+
+var suckers = []struct {
+	chainId chainId
+	address common.Address
+}{
+	{
+		chainId: sepolia,
+		address: common.HexToAddress("0xf19736127f87569423eC4F10FD8CC984bbcE0A17"),
+	},
+	{
+		chainId: opSepolia,
+		address: common.HexToAddress("0xf19736127f87569423eC4F10FD8CC984bbcE0A17"),
 	},
 }
 
@@ -80,7 +111,7 @@ func main() {
 }
 
 type ProofRequest struct {
-	ChainId int            `json:"chainId"` // The chain ID of the sucker contract
+	ChainId chainId        `json:"chainId"` // The chain ID of the sucker contract
 	Sucker  common.Address `json:"sucker"`  // The sucker contract address
 	Token   common.Address `json:"token"`   // The address of the token being claimed
 	Leaf    BPLeaf         `json:"leaf"`    // The leaf to prove on the sucker contract
@@ -130,6 +161,34 @@ func proof(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 
+		// Check if the inbox root + count matches the database
+		var dbRoot string
+		var dbCount uint
+		err = db.QueryRowContext(ctx, `SELECT current_root, count FROM trees
+			WHERE chain_id = ? AND contract_address = ? AND token_address = ?`,
+			toProve.ChainId, toProve.Sucker.String(), toProve.Token.String()).Scan(&dbRoot, &dbCount)
+
+		if err != nil && err != sql.ErrNoRows {
+			log.Printf("Failed to query database: %v\n", err)
+			http.Error(w, "Failed to query database", http.StatusInternalServerError)
+			return
+		}
+
+		// If the database did not have the tree, or if the roots didn't match, update the database.
+		if err == sql.ErrNoRows || dbRoot != hex.EncodeToString(tree.Root[:]) {
+			// Update the database
+			updateLeaves(ctx, TokenTree{
+				ChainId:       chainId(toProve.ChainId),
+				SuckerAddress: toProve.Sucker,
+				TokenAddress:  toProve.Token,
+				Root:          tree.Root,
+			})
+		}
+
+		// If it does, get the proof from the database and return it
+
+		// If it doesn't, update the database and get the proof from the sucker
+
 		peerChainId, peerContractAddr, err := peer(toProve.ChainId, toProve.Sucker, localSucker, ctx)
 		if err != nil {
 			http.Error(w, "Failed to get peer", http.StatusInternalServerError)
@@ -176,6 +235,146 @@ func proof(w http.ResponseWriter, req *http.Request) {
 
 		w.Write(b)
 	}
+}
+
+// A BPLeaf as stored in sqlite
+type Leaf struct {
+	ChainId         int    `db:"chain_id"`
+	ContractAddress string `db:"contract_address"`
+	TokenAddress    string `db:"token_address"`
+	LeafIndex       uint   `db:"leaf_index"`
+	LeafHash        string `db:"leaf_hash"`
+}
+
+// Update the leaves in the database for a specific sucker
+func updateLeaves(ctx context.Context, tokenTree TokenTree) error {
+	client, ok := clients[tokenTree.ChainId]
+	if !ok {
+		return fmt.Errorf("chain %d not supported", tokenTree.ChainId)
+	}
+
+	sucker, err := NewBPSucker(tokenTree.SuckerAddress, client)
+	if err != nil {
+		return fmt.Errorf("failed to instantiate the sucker contract: %v", err)
+	}
+
+	// Get the latest hash from the db
+	var latestHash string
+	err = db.QueryRowContext(ctx, `SELECT leaf_hash FROM leaves
+		WHERE chain_id = ? AND contract_address = ? AND token_address = ?
+		ORDER BY leaf_index DESC LIMIT 1`,
+		tokenTree.ChainId, tokenTree.SuckerAddress.String(), tokenTree.TokenAddress.String()).Scan(&latestHash)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("failed to query database: %v", err)
+	}
+
+	latestHashBytes, err := hex.DecodeString(latestHash)
+	if err != nil {
+		return fmt.Errorf("failed to decode leaf hash '%s': %v", latestHash, err)
+	}
+
+	seenLatestDbLeaf := false
+	// Start from the beginning if there are no leaves in the db
+	if err == sql.ErrNoRows {
+		seenLatestDbLeaf = true
+	}
+
+	inboxTreeRoot, err := sucker.Inbox(&bind.CallOpts{Context: ctx}, tokenTree.TokenAddress)
+	if err != nil {
+		return fmt.Errorf("failed to get inbox tree root: %v", err)
+	}
+
+	peerSuckerAddr, err := sucker.PEER(&bind.CallOpts{Context: ctx})
+	if err != nil {
+		return fmt.Errorf("failed to get peer: %v", err)
+	}
+
+	var peerChainId chainId
+	if tokenTree.ChainId == sepolia {
+		peerChainId = opSepolia
+	} else if tokenTree.ChainId == opSepolia {
+		peerChainId = sepolia
+	} else {
+		return fmt.Errorf("peer chain not supported")
+	}
+
+	peerClient, ok := clients[peerChainId]
+	if !ok {
+		return fmt.Errorf("peer chain %d not supported", peerChainId)
+	}
+
+	peerSucker, err := NewBPSucker(peerSuckerAddr, peerClient)
+	if err != nil {
+		return fmt.Errorf("failed to instantiate the peer sucker contract: %v", err)
+	}
+
+	outboxIterator, err := peerSucker.FilterInsertToOutboxTree(&bind.FilterOpts{Context: ctx}, nil, []common.Address{tokenTree.TokenAddress})
+	if err != nil {
+		return fmt.Errorf("failed to instantiate outbox iterator: %v", err)
+	}
+	defer outboxIterator.Close()
+
+	leavesToInsert := make([]Leaf, 0)
+	for outboxIterator.Next() {
+		// Keep iterating until we pass the latest hash
+		if !seenLatestDbLeaf {
+			if bytes.Equal(outboxIterator.Event.Hashed[:], latestHashBytes) {
+				seenLatestDbLeaf = true
+			}
+			continue
+		}
+
+		// Add the remaining leaves to the list to insert
+		leavesToInsert = append(leavesToInsert, Leaf{
+			ChainId:         int(tokenTree.ChainId),
+			ContractAddress: tokenTree.SuckerAddress.String(),
+			LeafIndex:       uint(outboxIterator.Event.Index.Uint64()),
+			TokenAddress:    tokenTree.TokenAddress.String(),
+			LeafHash:        hex.EncodeToString(outboxIterator.Event.Hashed[:]),
+		})
+
+		// If we've gotten to the latest root, break
+		if inboxTreeRoot.Root == outboxIterator.Event.Root {
+			break
+		}
+	}
+
+	if err := outboxIterator.Error(); err != nil {
+		return fmt.Errorf("failed while iterating through outbox insertions: %v", err)
+	}
+
+	// Start sqlite transaction to insert leaves
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to start sqlite transaction: %v", err)
+	}
+
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO leaves (chain_id, contract_address, token_address, leaf_index, leaf_hash)
+		VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare sqlite statement: %v", err)
+	}
+	defer stmt.Close()
+
+	for _, leaf := range leavesToInsert {
+		_, err := stmt.ExecContext(ctx, leaf.ChainId, leaf.ContractAddress, leaf.TokenAddress, leaf.LeafIndex, leaf.LeafHash)
+		if err != nil {
+			tx.Rollback() // Rollback the transaction if an error occurs
+			return fmt.Errorf("failed to insert leaf into sqlite: %v", err)
+		}
+	}
+
+	finalCount := leavesToInsert[len(leavesToInsert)-1].LeafIndex
+
+	tx.ExecContext(ctx, `INSERT OR REPLACE INTO trees (chain_id, contract_address, token_address, current_root, count)
+		VALUES (?, ?, ?, ?, ?)`, tokenTree.ChainId, tokenTree.SuckerAddress.String(), tokenTree.TokenAddress.String(),
+		hex.EncodeToString(inboxTreeRoot.Root[:]), finalCount)
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit sqlite transaction: %v", err)
+	}
+
+	return nil
 }
 
 func (leaf BPLeaf) hash() (common.Hash, error) {
@@ -243,13 +442,21 @@ func peer(suckerChainId chainId, suckerAddress common.Address, localSucker *BPSu
 	}
 }
 
-func dbProof(leaf BPLeaf, root common.Hash, suckerChainId chainId, suckerAddress common.Address, tokenAddress common.Address, ctx context.Context) ([][]byte, bool, error) {
+type TokenTree struct {
+	ChainId       chainId
+	SuckerAddress common.Address
+	TokenAddress  common.Address
+	Root          common.Hash
+	Count         *big.Int
+}
+
+func dbProof(leaf BPLeaf, tokenTree *TokenTree, ctx context.Context) ([][]byte, bool, error) {
 	var dbRoot string
 	var dbCount uint
 
 	err := db.QueryRowContext(ctx, `SELECT current_root, count FROM trees
 		WHERE chain_id = ? AND contract_address = ? AND token_address = ?`,
-		suckerChainId, suckerAddress.String(), tokenAddress.String()).
+		tokenTree.ChainId, tokenTree.SuckerAddress.String(), tokenTree.TokenAddress.String()).
 		Scan(&dbRoot, &dbCount)
 
 	// TODO: this probably doesn't matter that much
@@ -265,18 +472,20 @@ func dbProof(leaf BPLeaf, root common.Hash, suckerChainId chainId, suckerAddress
 		return nil, false, fmt.Errorf("failed to query database")
 	}
 
-	// If no rows were found, or the roots don't match, we need to update the database.
-	if err == sql.ErrNoRows || err == nil && dbRoot != root.String() {
+	// If no rows were found, or the counts/roots don't match, we need to update the database.
+	if err == sql.ErrNoRows || dbRoot != tokenTree.Root.String() || tokenTree.Count.Cmp(big.NewInt(int64(dbCount))) != 0 {
 		// TODO: update the database
 	}
 
-	// Remaining case: err == nil and roots match
-
 	rows, err := db.QueryContext(ctx, `SELECT leaf_hash FROM leaves
 		WHERE chain_id = ? AND contract_address = ? AND token_address = ?`,
-		suckerChainId, suckerAddress.String(), tokenAddress.String())
+		tokenTree.ChainId, tokenTree.SuckerAddress.String(), tokenTree.TokenAddress.String())
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to query database")
+		if err == sql.ErrNoRows {
+			// TODO: update the database
+		} else {
+			return nil, false, fmt.Errorf("failed to query database")
+		}
 	}
 
 	leaves := make([][]byte, 0, dbCount)
@@ -299,7 +508,7 @@ func dbProof(leaf BPLeaf, root common.Hash, suckerChainId chainId, suckerAddress
 	treeRoot := t.Root()
 
 	// Sanity check the tree root
-	if hex.EncodeToString(treeRoot) != root.String() {
+	if !slices.Equal(treeRoot, tokenTree.Root.Bytes()) {
 		// TODO: update the database
 		return nil, false, fmt.Errorf("calculated tree root does not match reported tree root in db")
 	}
