@@ -10,6 +10,7 @@ import (
 	"juicerkle/tree"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -18,78 +19,14 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+// An EVM chain ID
 type chainId int
 
-const (
-	mainnet  chainId = 1
-	optimism chainId = 10
-	base     chainId = 8453
-	arbitrum chainId = 42161
-)
-
-const (
-	sepolia   chainId = 11155111
-	opSepolia chainId = 11155420
-)
-
-// Map of chainId to ethclient.Client
-var clients = make(map[chainId]*ethclient.Client)
-
-var networks = []struct {
-	name    string
-	chainId chainId
-	rpcUrl  string
-}{
-	{
-		name:    "mainnet",
-		chainId: mainnet,
-		rpcUrl:  "https://rpc.ankr.com/eth",
-	},
-	{
-		name:    "sepolia",
-		chainId: sepolia,
-		rpcUrl:  "https://rpc.sepolia.org",
-	},
-	{
-		name:    "optimism",
-		chainId: optimism,
-		rpcUrl:  "https://rpc.ankr.com/optimism",
-	},
-	{
-		name:    "optimism sepolia",
-		chainId: opSepolia,
-		rpcUrl:  "https://sepolia.optimism.io",
-	},
-	{
-		name:    "base",
-		chainId: base,
-		rpcUrl:  "https://rpc.ankr.com/base",
-	},
-	{
-		name:    "arbitrum",
-		chainId: arbitrum,
-		rpcUrl:  "https://rpc.ankr.com/arbitrum",
-	},
-}
-
-func main() {
-	// Set up ETH clients
-	for _, network := range networks {
-		client, err := ethclient.Dial(network.rpcUrl)
-		if err != nil {
-			log.Fatalf("Failed to connect to the %s network: %v", network.name, err)
-		}
-		clients[network.chainId] = client
-	}
-
-	// Set up DB
-	if err := initDb(); err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
-	}
-	defer db.Close()
-
-	http.HandleFunc("POST /proof", proof)
-	http.ListenAndServe(":8080", nil)
+// An item in config.json
+type ConfigItem struct {
+	Name    string  `json:"name"`
+	ChainId chainId `json:"chainId"`
+	RpcUrl  string  `json:"rpcUrl"`
 }
 
 // A BPLeaf as stored in sqlite
@@ -109,11 +46,52 @@ type InboxTree struct {
 	Root          [32]byte
 }
 
+// Schema for incoming proof requests
 type ProofRequest struct {
 	ChainId chainId        `json:"chainId"` // The chain ID of the sucker contract
 	Sucker  common.Address `json:"sucker"`  // The sucker contract address
 	Token   common.Address `json:"token"`   // The address of the token being claimed
 	Index   uint           `json:"index"`   // The index of the leaf to prove on the sucker contract
+}
+
+// Map of chainId to ethclient.Client
+var clients = make(map[chainId]*ethclient.Client)
+
+func main() {
+	// Read config
+	var config []ConfigItem
+	configFile, err := os.ReadFile("config.json")
+	if err != nil {
+		log.Fatalf("Could not read config.json: %v\n", err)
+	}
+
+	if err := json.Unmarshal(configFile, &config); err != nil {
+		log.Fatalf("Failed to unmarshal config.json: %v\n", err)
+	}
+
+	// Set up ETH clients
+	for _, network := range config {
+		client, err := ethclient.Dial(network.RpcUrl)
+		if err != nil {
+			log.Fatalf("Failed to connect to the %s network: %v", network.Name, err)
+		}
+		clients[network.ChainId] = client
+	}
+
+	// Set up DB
+	if err := initDb(); err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+	defer db.Close()
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	http.HandleFunc("POST /proof", proof)
+	log.Printf("Listening on http://localhost:%s\n", port)
+	http.ListenAndServe(":"+port, nil)
 }
 
 func proof(w http.ResponseWriter, req *http.Request) {
@@ -227,6 +205,9 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	}
 
 	// Get peer chain ID and address
+	// TODO: Implement check once BPSucker supports it
+	sepolia := chainId(11155111)
+	opSepolia := chainId(11155420)
 	var peerChainId chainId
 	switch inboxTree.ChainId {
 	case sepolia:

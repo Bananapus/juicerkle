@@ -1,0 +1,32 @@
+[
+  {
+    "name": "mainnet",
+    "chainId": 1,
+    "rpcUrl": "https://rpc.ankr.com/eth"
+  },
+  {
+    "name": "sepolia",
+    "chainId": 11155111,
+    "rpcUrl": "https://rpc.sepolia.org"
+  },
+  {
+    "name": "optimism",
+    "chainId": 10,
+    "rpcUrl": "https://rpc.ankr.com/optimism"
+  },
+  {
+    "name": "optimism sepolia",
+    "chainId": 11155420,
+    "rpcUrl": "https://sepolia.optimism.io"
+  },
+  {
+    "name": "base",
+    "chainId": 8453,
+    "rpcUrl": "https://rpc.ankr.com/base"
+  },
+  {
+    "name": "arbitrum",
+    "chainId": 42161,
+    "rpcUrl": "https://rpc.ankr.com/arbitrum"
+  }
+]
