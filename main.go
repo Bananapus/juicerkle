@@ -205,18 +205,11 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	}
 
 	// Get peer chain ID and address
-	// TODO: Implement check once BPSucker supports it
-	sepolia := chainId(11155111)
-	opSepolia := chainId(11155420)
-	var peerChainId chainId
-	switch inboxTree.ChainId {
-	case sepolia:
-		peerChainId = opSepolia
-	case opSepolia:
-		peerChainId = sepolia
-	default:
-		return fmt.Errorf("peer chain not supported")
+	peerSuckerChainId, err := sucker.PeerChainID(&bind.CallOpts{Context: ctx})
+	if err != nil {
+		return fmt.Errorf("failed to get peer chain ID: %v", err)
 	}
+	peerChainId := chainId(peerSuckerChainId.Uint64())
 
 	peerSuckerAddr, err := sucker.PEER(&bind.CallOpts{Context: ctx})
 	if err != nil {
