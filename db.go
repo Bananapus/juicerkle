@@ -6,7 +6,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const treeDb = "trees.db"
+var treeDb = "trees.db"
 
 var db *sql.DB
 
