@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,7 +38,7 @@ func TestE2E(t *testing.T) {
 	}
 
 	// Make sure the necessary tools are installed
-	tools := []string{"git", "forge", "anvil", "npm"}
+	tools := []string{"git", "forge", "anvil", "npm", "npx"}
 	for _, tool := range tools {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Fatalf("Could not find '%s' executable in path: %v", tool, err)
@@ -111,6 +114,11 @@ func TestE2E(t *testing.T) {
 	t.Logf("Temp dir: %s", tempDir)
 	defer os.RemoveAll(tempDir)
 
+	// Set RPC endpoints for deployments
+	os.Setenv("RPC_ETHEREUM_MAINNET", "http://localhost:"+mainnetPort)
+	os.Setenv("RPC_OPTIMISM_MAINNET", "http://localhost:"+opPort)
+	sphinxArgs := []string{"sphinx", "deploy", "script/Deploy.s.sol", "--confirm", "--silent", "--verify", "false"}
+
 	repos := []struct {
 		url           string
 		name          string
@@ -120,37 +128,65 @@ func TestE2E(t *testing.T) {
 		{
 			url:           "https://github.com/Bananapus/nana-core.git",
 			name:          "nana-core",
-			deployCommand: "forge",
-			deployArgs:    []string{}, // TODO: Add args
+			deployCommand: "npx",
+			deployArgs:    sphinxArgs,
 		},
 		{
 			url:           "https://github.com/Bananapus/nana-suckers.git",
 			name:          "nana-suckers",
-			deployCommand: "forge",
-			deployArgs:    []string{}, // TODO: Add args
+			deployCommand: "npx",
+			deployArgs:    sphinxArgs,
 		},
 	}
 	for _, repo := range repos {
-		// Clone
-		cmd := exec.Command("git", "clone", repo.url, tempDir+"/"+repo.name)
+		repoPath := filepath.Join(tempDir, repo.name)
+		cmd := exec.Command("git", "clone", repo.url, repoPath)
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("Failed to clone repo '%s': %v", repo.url, err)
-		}
-		if err := os.Chdir(tempDir + "/" + repo.name); err != nil {
-			t.Fatalf("Failed to change to directory '%s': %v", tempDir+"/"+repo.name, err)
 		}
 
 		// Install npm dependencies
 		cmd = exec.Command("npm", "ci")
+		cmd.Dir = repoPath
 		if err := cmd.Run(); err != nil {
-			t.Fatalf("Failed to run 'npm ci' in '%s': %v", repo.name, err)
+			t.Fatalf("Failed to run 'npm ci' in '%s': %v", repoPath, err)
 		}
 
-		// Deploy
-		cmd = exec.Command(repo.deployCommand, repo.deployArgs...)
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("Failed to run '%s' with args '%s' in '%s': %v", repo.deployCommand, repo.deployArgs, repo.name, err)
+		// Deploy to mainnet and optimism concurrently
+		var wg sync.WaitGroup
+		wg.Add(2)
+		errChan := make(chan error, 2)
+
+		go func() {
+			defer wg.Done()
+			cmd = exec.Command(repo.deployCommand, append(repo.deployArgs, "--network", "ethereum")...)
+			cmd.Dir = repoPath
+			if err := cmd.Run(); err != nil {
+				errChan <- fmt.Errorf("Failed to deploy %s to mainnet with cmd '%s %s --network mainnet': %v", repo.name, repo.deployCommand, repo.deployArgs, err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			cmd = exec.Command(repo.deployCommand, append(repo.deployArgs, "--network", "optimism")...)
+			cmd.Dir = repoPath
+			if err := cmd.Run(); err != nil {
+				errChan <- fmt.Errorf("Failed to deploy %s to optimism with cmd '%s %s --network optimism': %v", repo.name, repo.deployCommand, repo.deployArgs, err)
+			}
+		}()
+
+		wg.Wait()
+		close(errChan)
+		for err := range errChan {
+			if err != nil {
+				t.Fatal(err)
+			}
 		}
+
+		// Set the nana-core deployment path for the suckers to use
+		if repo.name == "nana-core" {
+			os.Setenv("NANA_CORE_DEPLOYMENT_PATH", filepath.Join(tempDir, repo.name, "deployments"))
+		}
+
 	}
 
 	// Set up testing database
