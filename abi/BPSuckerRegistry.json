@@ -1,0 +1,360 @@
+[
+  {
+    "type": "constructor",
+    "inputs": [
+      {
+        "name": "projects",
+        "type": "address",
+        "internalType": "contract IJBProjects"
+      },
+      {
+        "name": "permissions",
+        "type": "address",
+        "internalType": "contract IJBPermissions"
+      },
+      {
+        "name": "_initialOwner",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "PERMISSIONS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IJBPermissions"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "PROJECTS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IJBProjects"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "allowSuckerDeployer",
+    "inputs": [
+      {
+        "name": "deployer",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "allowSuckerDeployers",
+    "inputs": [
+      {
+        "name": "deployers",
+        "type": "address[]",
+        "internalType": "address[]"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "deploySuckersFor",
+    "inputs": [
+      {
+        "name": "projectId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "salt",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "configurations",
+        "type": "tuple[]",
+        "internalType": "struct BPSuckerDeployerConfig[]",
+        "components": [
+          {
+            "name": "deployer",
+            "type": "address",
+            "internalType": "contract IBPSuckerDeployer"
+          },
+          {
+            "name": "mappings",
+            "type": "tuple[]",
+            "internalType": "struct BPTokenMapping[]",
+            "components": [
+              {
+                "name": "localToken",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "minGas",
+                "type": "uint32",
+                "internalType": "uint32"
+              },
+              {
+                "name": "remoteToken",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "minBridgeAmount",
+                "type": "uint256",
+                "internalType": "uint256"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "suckers",
+        "type": "address[]",
+        "internalType": "address[]"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "isSuckerOf",
+    "inputs": [
+      {
+        "name": "projectId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "suckerAddress",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "jbOwner",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "projectId",
+        "type": "uint88",
+        "internalType": "uint88"
+      },
+      {
+        "name": "permissionId",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "owner",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "renounceOwnership",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setPermissionId",
+    "inputs": [
+      {
+        "name": "permissionId",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "suckerDeployerIsAllowed",
+    "inputs": [
+      {
+        "name": "deployer",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "suckersOf",
+    "inputs": [
+      {
+        "name": "projectId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address[]",
+        "internalType": "address[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "transferOwnership",
+    "inputs": [
+      {
+        "name": "newOwner",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "transferOwnershipToProject",
+    "inputs": [
+      {
+        "name": "projectId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "event",
+    "name": "OwnershipTransferred",
+    "inputs": [
+      {
+        "name": "previousOwner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "newOwner",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PermissionIdChanged",
+    "inputs": [
+      {
+        "name": "newIndex",
+        "type": "uint8",
+        "indexed": false,
+        "internalType": "uint8"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "SuckerDeployerAllowed",
+    "inputs": [
+      {
+        "name": "deployer",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "EnumerableMapNonexistentKey",
+    "inputs": [
+      {
+        "name": "key",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "INVALID_DEPLOYER",
+    "inputs": [
+      {
+        "name": "deployer",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "INVALID_NEW_OWNER",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UNAUTHORIZED",
+    "inputs": []
+  }
+]
+
