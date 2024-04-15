@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -104,7 +105,6 @@ func TestE2E(t *testing.T) {
 
 	t.Logf("Balance before: %v", balanceBefore)
 	t.Logf("Balance after: %v", balanceAfter)
-	t.Error("")
 
 	// Create a temporary folder for testing
 	tempDir, err := os.MkdirTemp("", "juicerkle-test")
@@ -117,7 +117,7 @@ func TestE2E(t *testing.T) {
 	// Set RPC endpoints for deployments
 	os.Setenv("RPC_ETHEREUM_MAINNET", "http://localhost:"+mainnetPort)
 	os.Setenv("RPC_OPTIMISM_MAINNET", "http://localhost:"+opPort)
-	sphinxArgs := []string{"sphinx", "deploy", "script/Deploy.s.sol", "--confirm", "--silent", "--verify", "false"}
+	sphinxArgs := []string{"sphinx", "deploy", "script/Deploy.s.sol", "--confirm", "--verify", "false"}
 
 	repos := []struct {
 		url           string
@@ -152,25 +152,37 @@ func TestE2E(t *testing.T) {
 			t.Fatalf("Failed to run 'npm ci' in '%s': %v", repoPath, err)
 		}
 
+		// Install forge dependencies and build
+		cmd = exec.Command("forge", "build")
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to run 'forge install' in '%s': %v", repoPath, err)
+		}
+
 		// Deploy to mainnet and optimism concurrently
 		var wg sync.WaitGroup
 		wg.Add(2)
 		errChan := make(chan error, 2)
+		var mainnetStdout, opStdout bytes.Buffer
 
 		go func() {
 			defer wg.Done()
 			cmd = exec.Command(repo.deployCommand, append(repo.deployArgs, "--network", "ethereum")...)
 			cmd.Dir = repoPath
+			cmd.Stdout = &mainnetStdout
 			if err := cmd.Run(); err != nil {
-				errChan <- fmt.Errorf("Failed to deploy %s to mainnet with cmd '%s %s --network mainnet': %v", repo.name, repo.deployCommand, repo.deployArgs, err)
+				errChan <- fmt.Errorf("Failed to deploy %s to mainnet with cmd '%s %s --network mainnet': %v\nFull output:\n%s",
+					repo.name, repo.deployCommand, repo.deployArgs, err, mainnetStdout.String())
 			}
 		}()
 		go func() {
 			defer wg.Done()
 			cmd = exec.Command(repo.deployCommand, append(repo.deployArgs, "--network", "optimism")...)
 			cmd.Dir = repoPath
+			cmd.Stdout = &opStdout
 			if err := cmd.Run(); err != nil {
-				errChan <- fmt.Errorf("Failed to deploy %s to optimism with cmd '%s %s --network optimism': %v", repo.name, repo.deployCommand, repo.deployArgs, err)
+				errChan <- fmt.Errorf("Failed to deploy %s to optimism with cmd '%s %s --network optimism': %v\nFull output:\n%s",
+					repo.name, repo.deployCommand, repo.deployArgs, err, opStdout.String())
 			}
 		}()
 
@@ -184,9 +196,16 @@ func TestE2E(t *testing.T) {
 
 		// Set the nana-core deployment path for the suckers to use
 		if repo.name == "nana-core" {
-			os.Setenv("NANA_CORE_DEPLOYMENT_PATH", filepath.Join(tempDir, repo.name, "deployments"))
+			deployPath := filepath.Join(tempDir, repo.name, "deployments")
+			os.Setenv("NANA_CORE_DEPLOYMENT_PATH", deployPath+"/")
+
+			// Remove -local from deployment directories.
+			for _, network := range []string{"ethereum", "optimism"} {
+				os.Rename(filepath.Join(deployPath, "nana-core", network+"-local"), filepath.Join(deployPath, "nana-core", network))
+			}
 		}
 
+		t.Logf("Successfully deployed %s to mainnet and optimism", repo.name)
 	}
 
 	// Set up testing database
