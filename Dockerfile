@@ -3,7 +3,13 @@
 # BUILD STAGE
 
 # Create a stage for building the application.
-FROM --platform=$BUILDPLATFORM golang:1.22.0 AS build
+FROM --platform=$BUILDPLATFORM golang:alpine3.19 AS build
+
+RUN apk add --no-cache \
+    # required for go-sqlite3
+    gcc \
+    # Required for Alpine
+    musl-dev
 
 WORKDIR /src
 
@@ -22,7 +28,7 @@ ARG TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod/ \
     --mount=type=bind,target=. \
     CGO_ENABLED=1 GOARCH=$TARGETARCH go build \
-    -ldflags '-linkmode external -extldflags "-static"' -a -o /juicerkle .
+    -ldflags '-s -w -extldflags "-static"' -o /juicerkle .
 
 # RUN STAGE
 FROM scratch AS final
@@ -33,7 +39,8 @@ COPY --from=build /juicerkle /juicerkle
 COPY config.json .
 
 # Expose the port that the application listens on.
-EXPOSE 8080
+ENV PORT=8080
+EXPOSE $PORT
 
 # What the container should run when it is started.
 ENTRYPOINT [ "/juicerkle" ]
