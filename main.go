@@ -262,6 +262,11 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 		return fmt.Errorf("failed while iterating through outbox insertions: %v", err)
 	}
 
+	if len(leavesToInsert) == 0 {
+		log.Printf("Found no leaves to insert for '%d:%s:%s'", inboxTree.ChainId, inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String())
+		return nil
+	}
+
 	// Start sqlite transaction to insert leaves
 	tx, err := db.Begin()
 	if err != nil {
