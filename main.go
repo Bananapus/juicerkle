@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"juicerkle/tree"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
-	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -19,28 +19,25 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// An EVM chain ID
-type chainId int
-
 // An item in config.json
-type ConfigItem struct {
-	Name    string  `json:"name"`
-	ChainId chainId `json:"chainId"`
-	RpcUrl  string  `json:"rpcUrl"`
+type NetworkConfig struct {
+	Name    string   `json:"name"`
+	ChainId *big.Int `json:"chainId"`
+	RpcUrl  string   `json:"rpcUrl"`
 }
 
 // A BPLeaf as stored in sqlite
 type Leaf struct {
-	ChainId         int    `db:"chain_id"`
+	ChainId         string `db:"chain_id"`
 	ContractAddress string `db:"contract_address"`
 	TokenAddress    string `db:"token_address"`
-	LeafIndex       uint   `db:"leaf_index"`
+	LeafIndex       string `db:"leaf_index"`
 	LeafHash        string `db:"leaf_hash"`
 }
 
 // A specification for an inbox tree on a sucker contract
 type InboxTree struct {
-	ChainId       chainId
+	ChainId       *big.Int
 	SuckerAddress common.Address
 	TokenAddress  common.Address
 	Root          [32]byte
@@ -48,127 +45,142 @@ type InboxTree struct {
 
 // Schema for incoming proof requests
 type ProofRequest struct {
-	ChainId chainId        `json:"chainId"` // The chain ID of the sucker contract
+	ChainId *big.Int       `json:"chainId"` // The chain ID of the sucker contract
 	Sucker  common.Address `json:"sucker"`  // The sucker contract address
 	Token   common.Address `json:"token"`   // The address of the token being claimed
-	Index   uint           `json:"index"`   // The index of the leaf to prove on the sucker contract
+	Index   *big.Int       `json:"index"`   // The index of the leaf to prove on the sucker contract
 }
 
-// Map of chainId to ethclient.Client
-var clients = make(map[chainId]*ethclient.Client)
+// Map of chain IDs to ETH clients
+var clients = make(map[*big.Int]*ethclient.Client)
 
 func main() {
-	// Read config
-	var config []ConfigItem
+	// Read networks
+	var networks []NetworkConfig
 	configFile, err := os.ReadFile("config.json")
 	if err != nil {
 		log.Fatalf("Could not read config.json: %v\n", err)
 	}
-
-	if err := json.Unmarshal(configFile, &config); err != nil {
+	if err := json.Unmarshal(configFile, &networks); err != nil {
 		log.Fatalf("Failed to unmarshal config.json: %v\n", err)
 	}
 
 	// Set up ETH clients
-	for _, network := range config {
+	for _, network := range networks {
 		client, err := ethclient.Dial(network.RpcUrl)
 		if err != nil {
-			log.Fatalf("Failed to connect to the %s network: %v", network.Name, err)
+			log.Fatalf("Failed to connect to the %s network: %v\n", network.Name, err)
 		}
 		clients[network.ChainId] = client
 	}
 
 	// Set up DB
 	if err := initDb(); err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
+		log.Fatalf("Failed to initialize database: %v\n", err)
 	}
 	defer db.Close()
 
+	// Default to 8080 if no port is specified
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
 	http.HandleFunc("POST /proof", proof)
+	http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		w.Write([]byte("Juicerkle running. Send requests to /proof."))
+	})
 	log.Printf("Listening on http://localhost:%s\n", port)
 	http.ListenAndServe(":"+port, nil)
 }
 
+var MaxIndex = big.NewInt(1 << 32)
+
 func proof(w http.ResponseWriter, req *http.Request) {
+	defer req.Body.Close()
+
 	var toProve ProofRequest
 	err := json.NewDecoder(req.Body).Decode(&toProve)
 	if err != nil {
-		log.Printf("Failed to parse request body: %v\n", err)
-		http.Error(w, "Failed to parse request body", http.StatusBadRequest)
+		errStr := fmt.Sprintf("Failed to parse proof request body: %v", err)
+		log.Println(errStr)
+		http.Error(w, errStr, http.StatusBadRequest)
 		return
 	}
 
-	if toProve.Index > 1<<32 {
-		http.Error(w, "Invalid leaf index (too large)", http.StatusBadRequest)
+	if toProve.Index.Cmp(MaxIndex) > 0 {
+		errStr := fmt.Sprintf("Invalid leaf index: %d (too large)", toProve.Index)
+		log.Println(errStr)
+		http.Error(w, errStr, http.StatusBadRequest)
 		return
 	}
 
-	// Set up cancellation context
-	ctx, cancel := context.WithTimeout(req.Context(), 15*time.Second)
+	// Set up context
+	// ctx, cancel := context.WithTimeout(req.Context(), 15*time.Second)
+	ctx, cancel := context.WithCancel(req.Context()) // Use cancel instead of timeout for debugging
 	defer cancel()
 
-	// Calculate the proof off of the main thread
-	proofCh := make(chan [][]byte)
-	go func() {
-		client, ok := clients[toProve.ChainId]
-		if !ok {
-			log.Printf("Chain %d not supported\n", toProve.ChainId)
-			http.Error(w, "Chain not supported", http.StatusBadRequest)
-			return
-		}
-
-		localSucker, err := NewBPSucker(toProve.Sucker, client)
-		if err != nil {
-			log.Printf("Failed to instantiate the sucker contract: %v\n", err)
-			http.Error(w, "Failed to instantiate the sucker contract", http.StatusInternalServerError)
-			return
-		}
-
-		inboxTree, err := localSucker.Inbox(&bind.CallOpts{Context: ctx}, toProve.Token)
-		if err != nil {
-			log.Printf("Failed to get inbox tree '%d:%s:%s' root: %v\n",
-				toProve.ChainId, toProve.Sucker.String(), toProve.Token.String(), err)
-			http.Error(w, "Failed to get inbox tree", http.StatusInternalServerError)
-			return
-		}
-
-		// Get the proof
-		proof, err := dbProof(ctx, toProve.Index, InboxTree{
-			ChainId:       toProve.ChainId,
-			SuckerAddress: toProve.Sucker,
-			TokenAddress:  toProve.Token,
-			Root:          inboxTree.Root,
-		})
-		if err != nil {
-			log.Printf("Failed to get proof: %v\n", err)
-			http.Error(w, "Failed to get proof", http.StatusInternalServerError)
-			return
-		}
-
-		proofCh <- proof
-	}()
-
-	// Wait for the proof or a cancellation
-	select {
-	case <-ctx.Done():
-		log.Printf("Request cancelled: %v\n", ctx.Err())
-		http.Error(w, "Request cancelled", http.StatusRequestTimeout)
+	client, ok := clients[toProve.ChainId]
+	if !ok {
+		errStr := fmt.Sprintf("No RPC for chain ID %s. Contact the developer to have it added.", toProve.ChainId)
+		log.Println(errStr)
+		http.Error(w, errStr, http.StatusNotFound)
 		return
-	case p := <-proofCh:
-		b, err := json.Marshal(p)
-		if err != nil {
-			log.Printf("Failed to marshal proof: %v\n", err)
-			http.Error(w, "Failed to marshal proof", http.StatusInternalServerError)
-			return
-		}
-
-		w.Write(b)
 	}
+
+	localSucker, err := NewBPSucker(toProve.Sucker, client)
+	if err != nil {
+		errStr := fmt.Sprintf("Failed to instantiate a BPSucker at address %s on network #%s: %v",
+			toProve.Sucker, toProve.ChainId, err)
+		log.Println(errStr)
+		http.Error(w, errStr, http.StatusInternalServerError)
+		return
+	}
+
+	// Default callOpts
+	callOpts := &bind.CallOpts{Context: ctx}
+
+	localInboxTree, err := localSucker.Inbox(callOpts, toProve.Token)
+	if err != nil {
+		errStr := fmt.Sprintf("Failed to get inbox tree root for token %s, sucker %s, and chain %d: %v",
+			toProve.Token, toProve.Sucker, toProve.ChainId, err)
+		log.Println(errStr)
+		http.Error(w, errStr, http.StatusInternalServerError)
+		return
+	}
+
+	// Check if the inbox tree root is empty. A nil argument is empty for bytes.Compare.
+	if bytes.Compare(localInboxTree.Root[:], nil) == 0 {
+		errStr := fmt.Sprintf("Inbox tree root for token %s, sucker %s, and chain %d is empty",
+			toProve.Token, toProve.Sucker, toProve.ChainId)
+		log.Println(errStr)
+		http.Error(w, errStr, http.StatusInternalServerError)
+		return
+	}
+
+	// TODO: Continue from here.
+
+	// Get the proof
+	proof, err := dbProof(ctx, toProve.Index, InboxTree{
+		ChainId:       toProve.ChainId,
+		SuckerAddress: toProve.Sucker,
+		TokenAddress:  toProve.Token,
+		Root:          localInboxTree.Root,
+	})
+	if err != nil {
+		log.Printf("Failed to get proof: %v\n", err)
+		http.Error(w, "Failed to get proof", http.StatusInternalServerError)
+		return
+	}
+
+	b, err := json.Marshal(proof)
+	if err != nil {
+		log.Printf("Failed to marshal proof: %v\n", err)
+		http.Error(w, "Failed to marshal proof", http.StatusInternalServerError)
+		return
+	}
+
+	w.Write(b)
 }
 
 // Update the leaves in the database for a specific sucker
@@ -222,11 +234,24 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	}
 
 	// Instantiate peer sucker and iterate through insertions to its outbox
+	log.Printf("Local sucker: %s on chain %d; Peer sucker: %s on chain %d\n",
+		inboxTree.SuckerAddress.String(), inboxTree.ChainId, peerSuckerAddr.String(), peerChainId)
 	peerSucker, err := NewBPSucker(peerSuckerAddr, peerClient)
 	if err != nil {
 		return fmt.Errorf("failed to instantiate the peer sucker contract '%s' on chain %d: %v", peerSuckerAddr.String(), peerChainId, err)
 	}
 
+	// Make sure the peers match
+	peerAddressOfPeerSucker, err := peerSucker.PEER(&bind.CallOpts{Context: ctx})
+	if err != nil {
+		return fmt.Errorf("failed to get peer address of peer sucker: %v", err)
+	}
+	if peerAddressOfPeerSucker.Cmp(inboxTree.SuckerAddress) != 0 {
+		return fmt.Errorf("peer address of peer sucker '%s' is '%s', which does not match local sucker '%s'",
+			peerSuckerAddr.String(), peerAddressOfPeerSucker.String(), inboxTree.SuckerAddress.String())
+	}
+
+	// Iterate through insertions to the peer sucker's outbox
 	outboxIterator, err := peerSucker.FilterInsertToOutboxTree(&bind.FilterOpts{Context: ctx}, nil, []common.Address{inboxTree.TokenAddress})
 	if err != nil {
 		return fmt.Errorf("failed to instantiate outbox iterator: %v", err)
