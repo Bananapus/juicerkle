@@ -94,7 +94,10 @@ func main() {
 	http.ListenAndServe(":"+port, nil)
 }
 
-var MaxIndex = big.NewInt(1 << 32)
+var (
+	MaxIndex = big.NewInt(1 << 32)
+	ZeroRoot = make([]byte, 32)
+)
 
 func proof(w http.ResponseWriter, req *http.Request) {
 	defer req.Body.Close()
@@ -149,16 +152,14 @@ func proof(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Check if the inbox tree root is empty. A nil argument is empty for bytes.Compare.
-	if bytes.Compare(localInboxTree.Root[:], nil) == 0 {
+	// Check if the inbox tree root is empty.
+	if bytes.Equal(localInboxTree.Root[:], ZeroRoot) {
 		errStr := fmt.Sprintf("Inbox tree root for token %s, sucker %s, and chain %d is empty",
 			toProve.Token, toProve.Sucker, toProve.ChainId)
 		log.Println(errStr)
 		http.Error(w, errStr, http.StatusInternalServerError)
 		return
 	}
-
-	// TODO: Continue from here.
 
 	// Get the proof
 	proof, err := dbProof(ctx, toProve.Index, InboxTree{
@@ -181,6 +182,88 @@ func proof(w http.ResponseWriter, req *http.Request) {
 	}
 
 	w.Write(b)
+}
+
+// Get the proof for a leaf from the database. If the database is out of date, update it.
+func dbProof(ctx context.Context, index *big.Int, inboxTree InboxTree) ([][]byte, error) {
+	var dbRoot string
+	var err error
+
+	logDescription := fmt.Sprintf("inbox %s of sucker %s on chain %s",
+		inboxTree.SuckerAddress, inboxTree.TokenAddress, inboxTree.ChainId)
+
+	row := db.QueryRowContext(ctx, `SELECT current_root FROM trees
+		WHERE chain_id = ? AND contract_address = ? AND token_address = ?`,
+		inboxTree.ChainId, inboxTree.SuckerAddress, inboxTree.TokenAddress)
+
+	if err = row.Scan(&dbRoot); err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("failed to query database for %s: %v", logDescription, err)
+	}
+	dbRootBytes, err := hex.DecodeString(dbRoot)
+	// This should never happen, but just in case:
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode dbRoot '%s' for %s: %v", dbRoot, logDescription, err)
+	}
+
+	// If no rows were found, or the roots don't match, we need to update the database.
+	if err == sql.ErrNoRows || !bytes.Equal(dbRootBytes, inboxTree.Root[:]) {
+		log.Printf("Updating the database for %s", logDescription)
+		if err := updateLeaves(ctx, inboxTree); err != nil {
+			return nil, fmt.Errorf("failed to update leaves for %s: %v", logDescription, err)
+		}
+	}
+
+	rows, err := db.QueryContext(ctx, `SELECT leaf_hash FROM leaves
+		WHERE chain_id = ? AND contract_address = ? AND token_address = ?`,
+		inboxTree.ChainId, inboxTree.SuckerAddress, inboxTree.TokenAddress)
+	if err != nil {
+		// Note: this includes sql.ErrNoRows
+		return nil, fmt.Errorf("failed to read leaves for %s from the database: %v", logDescription, err)
+	}
+
+	// Build the leaves at the bottom of the tree
+	leaves := make([][]byte, 0)
+	for rows.Next() {
+		var leafHash string
+		err := rows.Scan(&leafHash)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan leaf hash %s for %s: %v", leafHash, logDescription, err)
+		}
+
+		b, err := hex.DecodeString(leafHash)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode leaf hash %s for %s: %v", leafHash, logDescription, err)
+		}
+
+		leaves = append(leaves, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed while scanning leaves for %s from the database: %v", logDescription, err)
+	}
+
+	// Construct a tree with the retrieved leaves
+	t := tree.NewTree(leaves)
+	treeRoot := t.Root()
+
+	// Sanity check the tree root
+	if !bytes.Equal(treeRoot, inboxTree.Root[:]) {
+		return nil, fmt.Errorf("constructed tree has root %s, does not match onchain tree root %s for %s",
+			hex.EncodeToString(treeRoot), hex.EncodeToString(inboxTree.Root[:]), logDescription)
+	}
+
+	// We know the index is within uint bounds for 32/64-bit platforms because we check in the proof function.
+	proofIndex := uint(index.Uint64())
+	if proofIndex == 0 {
+		return nil, fmt.Errorf("index %s is out of bounds for %s", index, logDescription)
+	}
+
+	// Get and return the proof
+	p, err := t.Proof(proofIndex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get proof for %s: %v", logDescription, err)
+	}
+
+	return p, nil
 }
 
 // Update the leaves in the database for a specific sucker
@@ -324,72 +407,4 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	}
 
 	return nil
-}
-
-// Get the proof for a leaf from the database
-func dbProof(ctx context.Context, index uint, inboxTree InboxTree) ([][]byte, error) {
-	var dbRoot string
-	var err error
-
-	if err = db.QueryRowContext(ctx, `SELECT current_root FROM trees
-		WHERE chain_id = ? AND contract_address = ? AND token_address = ?`,
-		inboxTree.ChainId, inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String()).
-		Scan(&dbRoot); err != nil && err != sql.ErrNoRows {
-		return nil, fmt.Errorf("failed to query database")
-	}
-
-	dbRootBytes, err := hex.DecodeString(dbRoot)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode dbRoot '%s': %v", dbRoot, err)
-	}
-
-	// If no rows were found, or the counts/roots don't match, we need to update the database.
-	if err == sql.ErrNoRows || !bytes.Equal(dbRootBytes, inboxTree.Root[:]) {
-		if err := updateLeaves(ctx, inboxTree); err != nil {
-			return nil, fmt.Errorf("failed to update leaves: %v", err)
-		}
-	}
-
-	rows, err := db.QueryContext(ctx, `SELECT leaf_hash FROM leaves
-		WHERE chain_id = ? AND contract_address = ? AND token_address = ?`,
-		inboxTree.ChainId, inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String())
-	if err != nil {
-		// Note: this includes sql.ErrNoRows
-		return nil, fmt.Errorf("failed to get '%d:%s:%s' leaves from the database: %v",
-			inboxTree.ChainId, inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String(), err)
-	}
-
-	leaves := make([][]byte, 0)
-	for rows.Next() {
-		var leafHash string
-		err := rows.Scan(&leafHash)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan leaf hash %s: %v", leafHash, err)
-		}
-
-		b, err := hex.DecodeString(leafHash)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode leaf hash %s: %v", leafHash, err)
-		}
-
-		leaves = append(leaves, b)
-	}
-
-	// Construct a tree with the retrieved leaves
-	t := tree.NewTree(leaves)
-	treeRoot := t.Root()
-
-	// Sanity check the tree root
-	if !bytes.Equal(treeRoot, inboxTree.Root[:]) {
-		return nil, fmt.Errorf("calculated tree root '%s' does not match expected tree root '%s'",
-			hex.EncodeToString(treeRoot), hex.EncodeToString(inboxTree.Root[:]))
-	}
-
-	// Bounds are checked in the proof function
-	p, err := t.Proof(index)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get proof: %v", err)
-	}
-
-	return p, nil
 }
