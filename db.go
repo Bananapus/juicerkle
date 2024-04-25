@@ -10,6 +10,8 @@ const treeDb = "trees.db"
 
 var db *sql.DB
 
+// The db stores address hex values with 0x prefixes (standard for go-ethereum's common.address).
+// Roots and leaf hashes are stored as raw bytes for performance reasons.
 func initDb() error {
 	var err error
 
@@ -17,16 +19,6 @@ func initDb() error {
 	if err != nil {
 		return err
 	}
-
-	/*if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS suckers (
-		chain_id INTEGER,
-		contract_address TEXT,
-		peer_chain_id INTEGER,
-		peer_contract_address TEXT,
-		PRIMARY KEY (chain_id, contract_address)
-	);`); err != nil {
-		return err
-	}*/
 
 	// These are the inbox trees for each sucker. The leaves are read from the peer sucker.
 	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS trees (
@@ -41,6 +33,7 @@ func initDb() error {
 		return err
 	}
 
+	// Leaves are associated with their inbox tree, not outbox trees.
 	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS leaves (
 		chain_id INTEGER,
 		contract_address TEXT,
