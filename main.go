@@ -123,18 +123,20 @@ func proof(w http.ResponseWriter, req *http.Request) {
 	ctx, cancel := context.WithCancel(req.Context()) // Use cancel instead of timeout for debugging
 	defer cancel()
 
+	logDescription := fmt.Sprintf("inbox %s of sucker %s on chain %s",
+		toProve.Token, toProve.Sucker, toProve.ChainId)
+
 	client, ok := clients[toProve.ChainId]
 	if !ok {
 		errStr := fmt.Sprintf("No RPC for chain ID %s. Contact the developer to have it added.", toProve.ChainId)
-		log.Println(errStr)
+		log.Println(errStr + logDescription)
 		http.Error(w, errStr, http.StatusNotFound)
 		return
 	}
 
 	localSucker, err := NewBPSucker(toProve.Sucker, client)
 	if err != nil {
-		errStr := fmt.Sprintf("Failed to instantiate a BPSucker at address %s on network #%s: %v",
-			toProve.Sucker, toProve.ChainId, err)
+		errStr := fmt.Sprintf("Failed to instantiate a BPSucker for %s: %v", logDescription, err)
 		log.Println(errStr)
 		http.Error(w, errStr, http.StatusInternalServerError)
 		return
@@ -145,8 +147,7 @@ func proof(w http.ResponseWriter, req *http.Request) {
 
 	localInboxTree, err := localSucker.Inbox(callOpts, toProve.Token)
 	if err != nil {
-		errStr := fmt.Sprintf("Failed to get inbox tree root for token %s, sucker %s, and chain %d: %v",
-			toProve.Token, toProve.Sucker, toProve.ChainId, err)
+		errStr := fmt.Sprintf("Failed to get inbox tree root for %s: %v", logDescription, err)
 		log.Println(errStr)
 		http.Error(w, errStr, http.StatusInternalServerError)
 		return
@@ -154,8 +155,7 @@ func proof(w http.ResponseWriter, req *http.Request) {
 
 	// Check if the inbox tree root is empty.
 	if bytes.Equal(localInboxTree.Root[:], ZeroRoot) {
-		errStr := fmt.Sprintf("Inbox tree root for token %s, sucker %s, and chain %d is empty",
-			toProve.Token, toProve.Sucker, toProve.ChainId)
+		errStr := fmt.Sprintf("Inbox tree root for %s is empty", logDescription)
 		log.Println(errStr)
 		http.Error(w, errStr, http.StatusInternalServerError)
 		return
@@ -169,15 +169,17 @@ func proof(w http.ResponseWriter, req *http.Request) {
 		Root:          localInboxTree.Root,
 	})
 	if err != nil {
-		log.Printf("Failed to get proof: %v\n", err)
-		http.Error(w, "Failed to get proof", http.StatusInternalServerError)
+		errStr := fmt.Sprintf("Failed to get proof for %s: %v", logDescription, err)
+		log.Println(errStr)
+		http.Error(w, errStr, http.StatusInternalServerError)
 		return
 	}
 
 	b, err := json.Marshal(proof)
 	if err != nil {
-		log.Printf("Failed to marshal proof: %v\n", err)
-		http.Error(w, "Failed to marshal proof", http.StatusInternalServerError)
+		errStr := fmt.Sprintf("Failed to marshal proof for %s: %v", logDescription, err)
+		log.Println(errStr)
+		http.Error(w, errStr, http.StatusInternalServerError)
 		return
 	}
 
@@ -186,18 +188,17 @@ func proof(w http.ResponseWriter, req *http.Request) {
 
 // Get the proof for a leaf from the database. If the database is out of date, update it.
 func dbProof(ctx context.Context, index *big.Int, inboxTree InboxTree) ([][]byte, error) {
-	var dbRoot string
-	var err error
-
 	logDescription := fmt.Sprintf("inbox %s of sucker %s on chain %s",
 		inboxTree.SuckerAddress, inboxTree.TokenAddress, inboxTree.ChainId)
 
+	// Get the current root from the database (which may be out of date)
 	row := db.QueryRowContext(ctx, `SELECT current_root FROM trees
 		WHERE chain_id = ? AND contract_address = ? AND token_address = ?`,
 		inboxTree.ChainId, inboxTree.SuckerAddress, inboxTree.TokenAddress)
 
-	if err = row.Scan(&dbRoot); err != nil && err != sql.ErrNoRows {
-		return nil, fmt.Errorf("failed to query database for %s: %v", logDescription, err)
+	var dbRoot string
+	if err := row.Scan(&dbRoot); err != nil && err != sql.ErrNoRows {
+		return nil, fmt.Errorf("failed to query root from database for %s: %v", logDescription, err)
 	}
 	dbRootBytes, err := hex.DecodeString(dbRoot)
 	// This should never happen, but just in case:
@@ -266,83 +267,100 @@ func dbProof(ctx context.Context, index *big.Int, inboxTree InboxTree) ([][]byte
 	return p, nil
 }
 
-// Update the leaves in the database for a specific sucker
+// Update the leaves in the database for a specific inbox tree
 func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
-	client, ok := clients[inboxTree.ChainId]
-	if !ok {
-		return fmt.Errorf("chain %d not supported", inboxTree.ChainId)
-	}
+	logDescription := fmt.Sprintf("inbox %s of sucker %s on chain %s",
+		inboxTree.SuckerAddress, inboxTree.TokenAddress, inboxTree.ChainId)
 
-	sucker, err := NewBPSucker(inboxTree.SuckerAddress, client)
-	if err != nil {
-		return fmt.Errorf("failed to instantiate the sucker contract: %v", err)
-	}
+	client := clients[inboxTree.ChainId] // chain was checked in the proof function
 
 	// Get the latest leaf hash for the tree from the db
-	var latestHash string
-	err = db.QueryRowContext(ctx, `SELECT leaf_hash FROM leaves
+	row := db.QueryRowContext(ctx, `SELECT leaf_hash FROM leaves
 		WHERE chain_id = ? AND contract_address = ? AND token_address = ?
 		ORDER BY leaf_index DESC LIMIT 1`,
-		inboxTree.ChainId, inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String()).Scan(&latestHash)
+		inboxTree.ChainId, inboxTree.SuckerAddress, inboxTree.TokenAddress)
+
+	var latestHash string
+	err := row.Scan(&latestHash)
 	if err != nil && err != sql.ErrNoRows {
-		return fmt.Errorf("failed to query database: %v", err)
+		return fmt.Errorf("failed to query latest leaf from database for %s: %v", logDescription, err)
 	}
 
 	seenLatestDbLeaf := false
 	var latestHashBytes []byte
 	if err == sql.ErrNoRows {
-		// Start from the beginning if there are no leaves in the db
+		// Start parsing events from the beginning if there are no leaves in the db
 		seenLatestDbLeaf = true
 	} else {
 		if latestHashBytes, err = hex.DecodeString(latestHash); err != nil {
-			return fmt.Errorf("failed to decode leaf hash '%s': %v", latestHash, err)
+			return fmt.Errorf("failed to decode leaf hash %s from db for %s: %v", latestHash, logDescription, err)
 		}
 	}
 
-	// Get peer chain ID and address
-	peerSuckerChainId, err := sucker.PeerChainID(&bind.CallOpts{Context: ctx})
+	// Instantiate the local sucker
+	localSucker, err := NewBPSucker(inboxTree.SuckerAddress, client)
 	if err != nil {
-		return fmt.Errorf("failed to get peer chain ID: %v", err)
-	}
-	peerChainId := chainId(peerSuckerChainId.Uint64())
-
-	peerSuckerAddr, err := sucker.PEER(&bind.CallOpts{Context: ctx})
-	if err != nil {
-		return fmt.Errorf("failed to get peer: %v", err)
+		return fmt.Errorf("failed to instantiate the sucker contract for %s: %v", logDescription, err)
 	}
 
-	peerClient, ok := clients[peerChainId]
+	// TODO: We can parallelize some of these reads if we need to reduce latency.
+
+	// We need to read the InsertToOutboxTree events from the peer sucker.
+	// First, get the peer sucker's chain ID and address.
+	callOpts := &bind.CallOpts{Context: ctx}
+	peerSuckerChainId, err := localSucker.PeerChainID(callOpts)
+	if err != nil {
+		return fmt.Errorf("failed to get peer chain ID for %s: %v", logDescription, err)
+	}
+	peerSuckerAddr, err := localSucker.PEER(callOpts)
+	if err != nil {
+		return fmt.Errorf("failed to get peer address for %s: %v", logDescription, err)
+	}
+	peerClient, ok := clients[peerSuckerChainId]
 	if !ok {
-		return fmt.Errorf("peer chain %d not supported", peerChainId)
+		return fmt.Errorf("no RPC for peer chain %d, peer for %s; contact the developer to have it added", peerSuckerChainId, logDescription)
 	}
 
-	// Instantiate peer sucker and iterate through insertions to its outbox
-	log.Printf("Local sucker: %s on chain %d; Peer sucker: %s on chain %d\n",
-		inboxTree.SuckerAddress.String(), inboxTree.ChainId, peerSuckerAddr.String(), peerChainId)
+	// Instantiate the peer sucker
 	peerSucker, err := NewBPSucker(peerSuckerAddr, peerClient)
 	if err != nil {
-		return fmt.Errorf("failed to instantiate the peer sucker contract '%s' on chain %d: %v", peerSuckerAddr.String(), peerChainId, err)
+		return fmt.Errorf("failed to instantiate the peer sucker at %s on chain %d for %s: %v", peerSuckerAddr, peerSuckerChainId, logDescription, err)
 	}
 
+	// Add peer information to further logging
+	logDescription += fmt.Sprintf(" with peer sucker %s on chain %d", peerSuckerAddr, peerSuckerChainId)
+
 	// Make sure the peers match
-	peerAddressOfPeerSucker, err := peerSucker.PEER(&bind.CallOpts{Context: ctx})
+	peerAddressOfPeerSucker, err := peerSucker.PEER(callOpts)
 	if err != nil {
 		return fmt.Errorf("failed to get peer address of peer sucker: %v", err)
 	}
 	if peerAddressOfPeerSucker.Cmp(inboxTree.SuckerAddress) != 0 {
-		return fmt.Errorf("peer address of peer sucker '%s' is '%s', which does not match local sucker '%s'",
-			peerSuckerAddr.String(), peerAddressOfPeerSucker.String(), inboxTree.SuckerAddress.String())
+		return fmt.Errorf("peer address of peer sucker %s on chain %d is %s, which does not match local sucker %s on chain %d",
+			peerSuckerAddr, peerSuckerChainId, peerAddressOfPeerSucker, inboxTree.SuckerAddress, inboxTree.ChainId)
+	}
+
+	// We also need to know what peer outbox token address the local inbox tree corresponds to
+	remoteToken, err := localSucker.RemoteTokenFor(callOpts, inboxTree.TokenAddress)
+	if err != nil {
+		return fmt.Errorf("failed to get remote token for %s: %v", logDescription, err)
 	}
 
 	// Iterate through insertions to the peer sucker's outbox
-	outboxIterator, err := peerSucker.FilterInsertToOutboxTree(&bind.FilterOpts{Context: ctx}, nil, []common.Address{inboxTree.TokenAddress})
+	outboxIterator, err := peerSucker.FilterInsertToOutboxTree(
+		&bind.FilterOpts{Context: ctx},
+		nil,
+		[]common.Address{remoteToken.Addr}, // Only get logs where the terminal token matches the correct remote token
+	)
 	if err != nil {
-		return fmt.Errorf("failed to instantiate outbox iterator: %v", err)
+		return fmt.Errorf("failed to instantiate peer outbox iterator for peer in request for %s: %v", logDescription, err)
 	}
 	defer outboxIterator.Close()
 
 	leavesToInsert := make([]Leaf, 0)
 	for outboxIterator.Next() {
+		log.Printf("Event: %+v", outboxIterator.Event)
+
 		// Keep iterating until we pass the latest hash
 		if !seenLatestDbLeaf {
 			if bytes.Equal(outboxIterator.Event.Hashed[:], latestHashBytes) {
@@ -352,33 +370,34 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 		}
 
 		// Add the remaining leaves to the list to insert
+		// Leaves are associated with their inbox tree
 		leavesToInsert = append(leavesToInsert, Leaf{
-			ChainId:         int(inboxTree.ChainId),
+			ChainId:         inboxTree.ChainId.String(),
 			ContractAddress: inboxTree.SuckerAddress.String(),
-			LeafIndex:       uint(outboxIterator.Event.Index.Uint64()),
+			LeafIndex:       outboxIterator.Event.Index.String(),
 			TokenAddress:    inboxTree.TokenAddress.String(),
 			LeafHash:        hex.EncodeToString(outboxIterator.Event.Hashed[:]),
 		})
 
-		// If we've gotten to the latest root, break
+		// If we've gotten to the latest inbox root, break
 		if inboxTree.Root == outboxIterator.Event.Root {
 			break
 		}
 	}
 
 	if err := outboxIterator.Error(); err != nil {
-		return fmt.Errorf("failed while iterating through outbox insertions: %v", err)
+		return fmt.Errorf("failed while iterating through outbox insertions for %s: %v", logDescription, err)
 	}
 
 	if len(leavesToInsert) == 0 {
-		log.Printf("Found no leaves to insert for '%d:%s:%s'", inboxTree.ChainId, inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String())
+		log.Printf("found no leaves to insert for %s", logDescription)
 		return nil
 	}
 
 	// Start sqlite transaction to insert leaves
 	tx, err := db.Begin()
 	if err != nil {
-		return fmt.Errorf("failed to start sqlite transaction: %v", err)
+		return fmt.Errorf("failed to start sqlite transaction for %s: %v", logDescription, err)
 	}
 
 	stmt, err := tx.PrepareContext(ctx, `INSERT INTO leaves (chain_id, contract_address, token_address, leaf_index, leaf_hash)
@@ -388,22 +407,24 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	}
 	defer stmt.Close()
 
+	// Insert the leaves
 	for _, leaf := range leavesToInsert {
 		_, err := stmt.ExecContext(ctx, leaf.ChainId, leaf.ContractAddress, leaf.TokenAddress, leaf.LeafIndex, leaf.LeafHash)
 		if err != nil {
 			tx.Rollback() // Rollback the transaction if an error occurs
-			return fmt.Errorf("failed to insert leaf into sqlite: %v", err)
+			return fmt.Errorf("failed to insert leaf into sqlite for %s: %v", logDescription, err)
 		}
 	}
 
-	finalCount := leavesToInsert[len(leavesToInsert)-1].LeafIndex
-
+	// Update the inbox tree root
+	finalCount := leavesToInsert[len(leavesToInsert)-1].LeafIndex // we checked that len != 0 above
 	tx.ExecContext(ctx, `INSERT OR REPLACE INTO trees (chain_id, contract_address, token_address, current_root, count)
-		VALUES (?, ?, ?, ?, ?)`, inboxTree.ChainId, inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String(),
+		VALUES (?, ?, ?, ?, ?)`, inboxTree.ChainId, inboxTree.SuckerAddress, inboxTree.TokenAddress,
 		hex.EncodeToString(inboxTree.Root[:]), finalCount)
 
+	// Commit the transaction
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit sqlite transaction: %v", err)
+		return fmt.Errorf("failed to commit sqlite transaction for %s: %v", logDescription, err)
 	}
 
 	return nil

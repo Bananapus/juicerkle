@@ -10,8 +10,8 @@ const treeDb = "trees.db"
 
 var db *sql.DB
 
-// The db stores hex values like addresses with 0x prefixes (standard for go-ethereum) except
-// for roots and leaf hashes, which are stored as raw bytes for performance reasons.
+// The db stores address hex values with 0x prefixes (standard for go-ethereum's common.address).
+// Roots and leaf hashes are stored as raw bytes for performance reasons.
 func initDb() error {
 	var err error
 
@@ -33,6 +33,7 @@ func initDb() error {
 		return err
 	}
 
+	// Leaves are associated with their inbox tree, not outbox trees.
 	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS leaves (
 		chain_id INTEGER,
 		contract_address TEXT,
