@@ -26,22 +26,24 @@ func initDb() error {
 		contract_address TEXT,
 		token_address TEXT,	
 		current_root TEXT,
-		count INTEGER,
 		PRIMARY KEY (chain_id, contract_address, token_address)
-		FOREIGN KEY (chain_id, contract_address) REFERENCES suckers (chain_id, contract_address)
 	);`); err != nil {
 		return err
 	}
 
 	// Leaves are associated with their inbox tree, not outbox trees.
+	// Claimed is a boolean
 	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS leaves (
 		chain_id INTEGER,
 		contract_address TEXT,
 		token_address TEXT,
-		leaf_index INTEGER,
+		index TEXT,
+		beneficiary TEXT,
+		project_token_amount TEXT,
+		terminal_token_amount TEXT,
 		leaf_hash TEXT,
-		PRIMARY KEY (chain_id, contract_address, token_address, leaf_index)
-		FOREIGN KEY (chain_id, contract_address, token_address) REFERENCES tree (chain_id, contract_address, token_address)
+		is_claimed INTEGER,
+		PRIMARY KEY (chain_id, contract_address, token_address, index)
 	);`); err != nil {
 		return err
 	}

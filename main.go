@@ -27,12 +27,16 @@ type NetworkConfig struct {
 }
 
 // A BPLeaf as stored in sqlite
-type Leaf struct {
-	ChainId         string `db:"chain_id"`
-	ContractAddress string `db:"contract_address"`
-	TokenAddress    string `db:"token_address"`
-	LeafIndex       string `db:"leaf_index"`
-	LeafHash        string `db:"leaf_hash"`
+type DBLeaf struct {
+	ChainId             string `db:"chain_id"`
+	ContractAddress     string `db:"contract_address"`
+	TokenAddress        string `db:"token_address"`
+	Index               string `db:"index"`
+	Beneficiary         string `db:"beneficiary"`
+	ProjectTokenAmount  string `db:"project_token_amount"`
+	TerminalTokenAmount string `db:"terminal_token_amount"`
+	LeafHash            string `db:"leaf_hash"`
+	IsClaimed           bool   `db:"is_claimed"`
 }
 
 // A specification for an inbox tree on a sucker contract
@@ -43,16 +47,16 @@ type InboxTree struct {
 	Root          [32]byte
 }
 
-// Schema for incoming proof requests
-type ProofRequest struct {
-	ChainId *big.Int       `json:"chainId"` // The chain ID of the sucker contract
-	Sucker  common.Address `json:"sucker"`  // The sucker contract address
-	Token   common.Address `json:"token"`   // The address of the token being claimed
-	Index   *big.Int       `json:"index"`   // The index of the leaf to prove on the sucker contract
+// Schema for incoming claims requests
+type ClaimsRequest struct {
+	ChainId     *big.Int       `json:"chainId"`     // The chain ID of the sucker contract
+	Sucker      common.Address `json:"sucker"`      // The sucker contract address
+	Token       common.Address `json:"token"`       // The token address of the inbox tree being claimed from
+	Beneficiary common.Address `json:"beneficiary"` // The address of the beneficiary to get the claims for
 }
 
-// Map of chain IDs to ETH clients
-var clients = make(map[*big.Int]*ethclient.Client)
+// Map of chain IDs (as strings) to ETH clients
+var clients = make(map[string]*ethclient.Client)
 
 func main() {
 	// Read networks
@@ -71,7 +75,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to connect to the %s network: %v\n", network.Name, err)
 		}
-		clients[network.ChainId] = client
+		clients[network.ChainId.String()] = client
 	}
 
 	// Set up DB
@@ -86,9 +90,9 @@ func main() {
 		port = "8080"
 	}
 
-	http.HandleFunc("POST /proof", proof)
+	http.HandleFunc("POST /claims", claims)
 	http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
-		w.Write([]byte("Juicerkle running. Send requests to /proof."))
+		w.Write([]byte("Juicerkle running. Send claim requests to /claims."))
 	})
 	log.Printf("Listening on http://localhost:%s\n", port)
 	http.ListenAndServe(":"+port, nil)
@@ -99,20 +103,13 @@ var (
 	ZeroRoot = make([]byte, 32)
 )
 
-func proof(w http.ResponseWriter, req *http.Request) {
+func claims(w http.ResponseWriter, req *http.Request) {
 	defer req.Body.Close()
 
-	var toProve ProofRequest
-	err := json.NewDecoder(req.Body).Decode(&toProve)
+	var toClaim ClaimsRequest
+	err := json.NewDecoder(req.Body).Decode(&toClaim)
 	if err != nil {
-		errStr := fmt.Sprintf("Failed to parse proof request body: %v", err)
-		log.Println(errStr)
-		http.Error(w, errStr, http.StatusBadRequest)
-		return
-	}
-
-	if toProve.Index.Cmp(MaxIndex) > 0 {
-		errStr := fmt.Sprintf("Invalid leaf index: %d (too large)", toProve.Index)
+		errStr := fmt.Sprintf("Failed to parse claims request body: %v", err)
 		log.Println(errStr)
 		http.Error(w, errStr, http.StatusBadRequest)
 		return
@@ -123,18 +120,18 @@ func proof(w http.ResponseWriter, req *http.Request) {
 	ctx, cancel := context.WithCancel(req.Context()) // Use cancel instead of timeout for debugging
 	defer cancel()
 
-	logDescription := fmt.Sprintf("inbox %s of sucker %s on chain %s",
-		toProve.Token, toProve.Sucker, toProve.ChainId)
+	logDescription := fmt.Sprintf("beneficiary %s; inbox %s of sucker %s on chain %s",
+		toClaim.Beneficiary, toClaim.Token, toClaim.Sucker, toClaim.ChainId)
 
-	client, ok := clients[toProve.ChainId]
+	client, ok := clients[toClaim.ChainId.String()]
 	if !ok {
-		errStr := fmt.Sprintf("No RPC for chain ID %s. Contact the developer to have it added.", toProve.ChainId)
-		log.Println(errStr + logDescription)
+		errStr := fmt.Sprintf("No RPC for chain ID %s. Contact the developer to have it added.", toClaim.ChainId)
+		log.Println(errStr + " For " + logDescription)
 		http.Error(w, errStr, http.StatusNotFound)
 		return
 	}
 
-	localSucker, err := NewBPSucker(toProve.Sucker, client)
+	localSucker, err := NewBPSucker(toClaim.Sucker, client)
 	if err != nil {
 		errStr := fmt.Sprintf("Failed to instantiate a BPSucker for %s: %v", logDescription, err)
 		log.Println(errStr)
@@ -142,10 +139,9 @@ func proof(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Default callOpts
+	// callOpts with our context
 	callOpts := &bind.CallOpts{Context: ctx}
-
-	localInboxTree, err := localSucker.Inbox(callOpts, toProve.Token)
+	localInboxTree, err := localSucker.Inbox(callOpts, toClaim.Token)
 	if err != nil {
 		errStr := fmt.Sprintf("Failed to get inbox tree root for %s: %v", logDescription, err)
 		log.Println(errStr)
@@ -157,27 +153,27 @@ func proof(w http.ResponseWriter, req *http.Request) {
 	if bytes.Equal(localInboxTree.Root[:], ZeroRoot) {
 		errStr := fmt.Sprintf("Inbox tree root for %s is empty", logDescription)
 		log.Println(errStr)
-		http.Error(w, errStr, http.StatusInternalServerError)
+		http.Error(w, errStr, http.StatusBadRequest)
 		return
 	}
 
-	// Get the proof
-	proof, err := dbProof(ctx, toProve.Index, InboxTree{
-		ChainId:       toProve.ChainId,
-		SuckerAddress: toProve.Sucker,
-		TokenAddress:  toProve.Token,
+	// Get the claims
+	claims, err := dbClaims(ctx, toClaim.Beneficiary, InboxTree{
+		ChainId:       toClaim.ChainId,
+		SuckerAddress: toClaim.Sucker,
+		TokenAddress:  toClaim.Token,
 		Root:          localInboxTree.Root,
 	})
 	if err != nil {
-		errStr := fmt.Sprintf("Failed to get proof for %s: %v", logDescription, err)
+		errStr := fmt.Sprintf("Failed to get claims for %s: %v", logDescription, err)
 		log.Println(errStr)
 		http.Error(w, errStr, http.StatusInternalServerError)
 		return
 	}
 
-	b, err := json.Marshal(proof)
+	b, err := json.Marshal(claims)
 	if err != nil {
-		errStr := fmt.Sprintf("Failed to marshal proof for %s: %v", logDescription, err)
+		errStr := fmt.Sprintf("Failed to marshal claims for %s: %v", logDescription, err)
 		log.Println(errStr)
 		http.Error(w, errStr, http.StatusInternalServerError)
 		return
@@ -186,8 +182,9 @@ func proof(w http.ResponseWriter, req *http.Request) {
 	w.Write(b)
 }
 
-// Get the proof for a leaf from the database. If the database is out of date, update it.
-func dbProof(ctx context.Context, index *big.Int, inboxTree InboxTree) ([][]byte, error) {
+// Get the currently available BPClaims for a beneficiary from the database.
+// If the database is out of date for the given inbox tree, update it.
+func dbClaims(ctx context.Context, beneficiary common.Address, inboxTree InboxTree) ([]BPClaim, error) {
 	logDescription := fmt.Sprintf("inbox %s of sucker %s on chain %s",
 		inboxTree.SuckerAddress, inboxTree.TokenAddress, inboxTree.ChainId)
 
@@ -214,29 +211,65 @@ func dbProof(ctx context.Context, index *big.Int, inboxTree InboxTree) ([][]byte
 		}
 	}
 
-	rows, err := db.QueryContext(ctx, `SELECT leaf_hash FROM leaves
-		WHERE chain_id = ? AND contract_address = ? AND token_address = ?`,
+	// Get the leaves to build the tree and claims
+	rows, err := db.QueryContext(ctx, `SELECT leaf_hash, index, beneficiary, project_token_amount, terminal_token_amount
+		FROM leaves WHERE chain_id = ? AND contract_address = ? AND token_address = ?
+		ORDER BY index ASC`,
 		inboxTree.ChainId, inboxTree.SuckerAddress, inboxTree.TokenAddress)
 	if err != nil {
 		// Note: this includes sql.ErrNoRows
 		return nil, fmt.Errorf("failed to read leaves for %s from the database: %v", logDescription, err)
 	}
 
-	// Build the leaves at the bottom of the tree
+	// Build the tree and claims from the database leaves
+	claims := make([]BPClaim, 0)
 	leaves := make([][]byte, 0)
+
+	// TODO: Check whether the leaf has already been claimed.
+	defer rows.Close()
 	for rows.Next() {
-		var leafHash string
-		err := rows.Scan(&leafHash)
+		var leafHash, index, leafBeneficiary, projectTokenAmount, terminalTokenAmount string
+		err := rows.Scan(&leafHash, &index, &leafBeneficiary, &projectTokenAmount, &terminalTokenAmount)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan leaf hash %s for %s: %v", leafHash, logDescription, err)
 		}
 
-		b, err := hex.DecodeString(leafHash)
+		h, err := hex.DecodeString(leafHash)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decode leaf hash %s for %s: %v", leafHash, logDescription, err)
 		}
 
-		leaves = append(leaves, b)
+		leaves = append(leaves, h)
+
+		// Check if the leaf is for the beneficiary we're looking for, and if so, add it to the claims
+		b, err := hex.DecodeString(leafBeneficiary)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode leaf beneficiary %s for %s: %v", leafBeneficiary, logDescription, err)
+		}
+		if bytes.Equal(b, beneficiary.Bytes()) {
+			idx, success := big.NewInt(0).SetString(index, 10)
+			if !success {
+				return nil, fmt.Errorf("failed to parse index %s for %s: %v", index, logDescription, err)
+			}
+			pt, success := big.NewInt(0).SetString(projectTokenAmount, 10)
+			if !success {
+				return nil, fmt.Errorf("failed to parse projectTokenAmount %s for %s: %v", projectTokenAmount, logDescription, err)
+			}
+			tt, success := big.NewInt(0).SetString(terminalTokenAmount, 10)
+			if !success {
+				return nil, fmt.Errorf("failed to parse terminalTokenAmount %s for %s: %v", terminalTokenAmount, logDescription, err)
+			}
+
+			claims = append(claims, BPClaim{
+				Token: inboxTree.TokenAddress,
+				Leaf: BPLeaf{
+					Index:               idx,
+					Beneficiary:         beneficiary,
+					ProjectTokenAmount:  pt,
+					TerminalTokenAmount: tt,
+				},
+			})
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("failed while scanning leaves for %s from the database: %v", logDescription, err)
@@ -252,19 +285,22 @@ func dbProof(ctx context.Context, index *big.Int, inboxTree InboxTree) ([][]byte
 			hex.EncodeToString(treeRoot), hex.EncodeToString(inboxTree.Root[:]), logDescription)
 	}
 
-	// We know the index is within uint bounds for 32/64-bit platforms because we check in the proof function.
-	proofIndex := uint(index.Uint64())
-	if proofIndex == 0 {
-		return nil, fmt.Errorf("index %s is out of bounds for %s", index, logDescription)
+	// Add the proofs to the claims
+	for _, claim := range claims {
+		// We know the index is within uint bounds for 32/64-bit platforms because there can only be 2^32 leaves
+		proofIndex := uint(claim.Leaf.Index.Uint64())
+		p, err := t.Proof(proofIndex)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get proof at index %d for %s: %v", proofIndex, logDescription, err)
+		}
+		proofArray, err := proofSliceToArray(p)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert proof to arrays for %s: %v", logDescription, err)
+		}
+		claim.Proof = proofArray
 	}
 
-	// Get and return the proof
-	p, err := t.Proof(proofIndex)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get proof for %s: %v", logDescription, err)
-	}
-
-	return p, nil
+	return claims, nil
 }
 
 // Update the leaves in the database for a specific inbox tree
@@ -272,12 +308,12 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	logDescription := fmt.Sprintf("inbox %s of sucker %s on chain %s",
 		inboxTree.SuckerAddress, inboxTree.TokenAddress, inboxTree.ChainId)
 
-	client := clients[inboxTree.ChainId] // chain was checked in the proof function
+	client := clients[inboxTree.ChainId.String()] // chain was checked in the handler function
 
 	// Get the latest leaf hash for the tree from the db
 	row := db.QueryRowContext(ctx, `SELECT leaf_hash FROM leaves
 		WHERE chain_id = ? AND contract_address = ? AND token_address = ?
-		ORDER BY leaf_index DESC LIMIT 1`,
+		ORDER BY index DESC LIMIT 1`,
 		inboxTree.ChainId, inboxTree.SuckerAddress, inboxTree.TokenAddress)
 
 	var latestHash string
@@ -289,7 +325,7 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	seenLatestDbLeaf := false
 	var latestHashBytes []byte
 	if err == sql.ErrNoRows {
-		// Start parsing events from the beginning if there are no leaves in the db
+		// Start parsing events from the beginning if our query didn't return any leaf
 		seenLatestDbLeaf = true
 	} else {
 		if latestHashBytes, err = hex.DecodeString(latestHash); err != nil {
@@ -304,7 +340,6 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	}
 
 	// TODO: We can parallelize some of these reads if we need to reduce latency.
-
 	// We need to read the InsertToOutboxTree events from the peer sucker.
 	// First, get the peer sucker's chain ID and address.
 	callOpts := &bind.CallOpts{Context: ctx}
@@ -316,7 +351,7 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	if err != nil {
 		return fmt.Errorf("failed to get peer address for %s: %v", logDescription, err)
 	}
-	peerClient, ok := clients[peerSuckerChainId]
+	peerClient, ok := clients[peerSuckerChainId.String()]
 	if !ok {
 		return fmt.Errorf("no RPC for peer chain %d, peer for %s; contact the developer to have it added", peerSuckerChainId, logDescription)
 	}
@@ -355,13 +390,13 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	if err != nil {
 		return fmt.Errorf("failed to instantiate peer outbox iterator for peer in request for %s: %v", logDescription, err)
 	}
+
+	leavesToInsert := make([]DBLeaf, 0)
 	defer outboxIterator.Close()
-
-	leavesToInsert := make([]Leaf, 0)
 	for outboxIterator.Next() {
-		log.Printf("Event: %+v", outboxIterator.Event)
+		log.Printf("Event: %+v", outboxIterator.Event) // TODO: Remove this once we know it's working
 
-		// Keep iterating until we pass the latest hash
+		// Keep skipping until we pass the latest hash
 		if !seenLatestDbLeaf {
 			if bytes.Equal(outboxIterator.Event.Hashed[:], latestHashBytes) {
 				seenLatestDbLeaf = true
@@ -371,12 +406,16 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 
 		// Add the remaining leaves to the list to insert
 		// Leaves are associated with their inbox tree
-		leavesToInsert = append(leavesToInsert, Leaf{
-			ChainId:         inboxTree.ChainId.String(),
-			ContractAddress: inboxTree.SuckerAddress.String(),
-			LeafIndex:       outboxIterator.Event.Index.String(),
-			TokenAddress:    inboxTree.TokenAddress.String(),
-			LeafHash:        hex.EncodeToString(outboxIterator.Event.Hashed[:]),
+		leavesToInsert = append(leavesToInsert, DBLeaf{
+			ChainId:             inboxTree.ChainId.String(),
+			ContractAddress:     inboxTree.SuckerAddress.String(),
+			TokenAddress:        inboxTree.TokenAddress.String(),
+			Index:               outboxIterator.Event.Index.String(),
+			Beneficiary:         outboxIterator.Event.Beneficiary.String(),
+			ProjectTokenAmount:  outboxIterator.Event.ProjectTokenAmount.String(),
+			TerminalTokenAmount: outboxIterator.Event.TerminalTokenAmount.String(),
+			LeafHash:            hex.EncodeToString(outboxIterator.Event.Hashed[:]),
+			IsClaimed:           false,
 		})
 
 		// If we've gotten to the latest inbox root, break
@@ -384,7 +423,6 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 			break
 		}
 	}
-
 	if err := outboxIterator.Error(); err != nil {
 		return fmt.Errorf("failed while iterating through outbox insertions for %s: %v", logDescription, err)
 	}
@@ -400,8 +438,10 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 		return fmt.Errorf("failed to start sqlite transaction for %s: %v", logDescription, err)
 	}
 
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO leaves (chain_id, contract_address, token_address, leaf_index, leaf_hash)
-		VALUES (?, ?, ?, ?, ?)`)
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO leaves 
+		(chain_id, contract_address, token_address, index, beneficiary,
+		project_token_amount, terminal_token_amount, leaf_hash, is_claimed)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare sqlite statement: %v", err)
 	}
@@ -409,7 +449,8 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 
 	// Insert the leaves
 	for _, leaf := range leavesToInsert {
-		_, err := stmt.ExecContext(ctx, leaf.ChainId, leaf.ContractAddress, leaf.TokenAddress, leaf.LeafIndex, leaf.LeafHash)
+		_, err := stmt.ExecContext(ctx, leaf.ChainId, leaf.ContractAddress, leaf.TokenAddress, leaf.Index, leaf.Beneficiary,
+			leaf.ProjectTokenAmount, leaf.TerminalTokenAmount, leaf.LeafHash, leaf.IsClaimed)
 		if err != nil {
 			tx.Rollback() // Rollback the transaction if an error occurs
 			return fmt.Errorf("failed to insert leaf into sqlite for %s: %v", logDescription, err)
@@ -417,10 +458,8 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	}
 
 	// Update the inbox tree root
-	finalCount := leavesToInsert[len(leavesToInsert)-1].LeafIndex // we checked that len != 0 above
-	tx.ExecContext(ctx, `INSERT OR REPLACE INTO trees (chain_id, contract_address, token_address, current_root, count)
-		VALUES (?, ?, ?, ?, ?)`, inboxTree.ChainId, inboxTree.SuckerAddress, inboxTree.TokenAddress,
-		hex.EncodeToString(inboxTree.Root[:]), finalCount)
+	tx.ExecContext(ctx, `INSERT OR REPLACE INTO trees (chain_id, contract_address, token_address, current_root) VALUES (?, ?, ?, ?)`,
+		inboxTree.ChainId, inboxTree.SuckerAddress, inboxTree.TokenAddress, hex.EncodeToString(inboxTree.Root[:]))
 
 	// Commit the transaction
 	if err := tx.Commit(); err != nil {
@@ -428,4 +467,22 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	}
 
 	return nil
+}
+
+// Convert a proof from slices to arrays, and make sure it's the right length.
+func proofSliceToArray(input [][]byte) ([32][32]byte, error) {
+	var output [32][32]byte
+
+	if len(input) != 32 {
+		return output, fmt.Errorf("input does not have exactly 32 elements")
+	}
+
+	for i, slice := range input {
+		if len(slice) != 32 {
+			return output, fmt.Errorf("slice %d is not exactly 32 bytes long", i)
+		}
+		copy(output[i][:], slice)
+	}
+
+	return output, nil
 }
