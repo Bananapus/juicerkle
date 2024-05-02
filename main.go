@@ -286,9 +286,9 @@ func dbClaims(ctx context.Context, beneficiary common.Address, inboxTree InboxTr
 	}
 
 	// Add the proofs to the claims
-	for _, claim := range claims {
+	for i := range claims {
 		// We know the index is within uint bounds for 32/64-bit platforms because there can only be 2^32 leaves
-		proofIndex := uint(claim.Leaf.Index.Uint64())
+		proofIndex := uint(claims[i].Leaf.Index.Uint64())
 		p, err := t.Proof(proofIndex)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get proof at index %d for %s: %v", proofIndex, logDescription, err)
@@ -297,7 +297,7 @@ func dbClaims(ctx context.Context, beneficiary common.Address, inboxTree InboxTr
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert proof to arrays for %s: %v", logDescription, err)
 		}
-		claim.Proof = proofArray
+		claims[i].Proof = proofArray
 	}
 
 	return claims, nil
@@ -394,7 +394,9 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	leavesToInsert := make([]DBLeaf, 0)
 	defer outboxIterator.Close()
 	for outboxIterator.Next() {
-		log.Printf("Event: %+v", outboxIterator.Event) // TODO: Remove this once we know it's working
+		// TODO: Remove this once we know it's working
+		log.Printf("Leaf index: %s; project token amount: %s; terminal token amount: %s",
+			outboxIterator.Event.Index.String(), outboxIterator.Event.ProjectTokenAmount.String(), outboxIterator.Event.TerminalTokenAmount.String())
 
 		// Keep skipping until we pass the latest hash
 		if !seenLatestDbLeaf {
