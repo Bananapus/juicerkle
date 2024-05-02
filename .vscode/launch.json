@@ -10,15 +10,6 @@
       "request": "launch",
       "mode": "debug",
       "program": "${fileDirname}"
-    },
-
-    {
-      "name": "Debug Tests",
-      "type": "go",
-      "request": "launch",
-      "mode": "test",
-      "program": "${fileDirname}",
-      "args": ["-test.v"]
     }
   ]
 }

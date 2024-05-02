@@ -31,10 +31,10 @@ type DBLeaf struct {
 	ChainId             string `db:"chain_id"`
 	ContractAddress     string `db:"contract_address"`
 	TokenAddress        string `db:"token_address"`
-	Index               string `db:"index"`
-	Beneficiary         string `db:"beneficiary"`
-	ProjectTokenAmount  string `db:"project_token_amount"`
-	TerminalTokenAmount string `db:"terminal_token_amount"`
+	Index               string `db:"leaf_index"`
+	Beneficiary         string `db:"leaf_beneficiary"`
+	ProjectTokenAmount  string `db:"leaf_project_token_amount"`
+	TerminalTokenAmount string `db:"leaf_terminal_token_amount"`
 	LeafHash            string `db:"leaf_hash"`
 	IsClaimed           bool   `db:"is_claimed"`
 }
@@ -92,7 +92,7 @@ func main() {
 
 	http.HandleFunc("POST /claims", claims)
 	http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
-		w.Write([]byte("Juicerkle running. Send claim requests to /claims."))
+		w.Write([]byte("Juicerkle running. Send claims requests to /claims."))
 	})
 	log.Printf("Listening on http://localhost:%s\n", port)
 	http.ListenAndServe(":"+port, nil)
@@ -186,12 +186,12 @@ func claims(w http.ResponseWriter, req *http.Request) {
 // If the database is out of date for the given inbox tree, update it.
 func dbClaims(ctx context.Context, beneficiary common.Address, inboxTree InboxTree) ([]BPClaim, error) {
 	logDescription := fmt.Sprintf("inbox %s of sucker %s on chain %s",
-		inboxTree.SuckerAddress, inboxTree.TokenAddress, inboxTree.ChainId)
+		inboxTree.TokenAddress, inboxTree.SuckerAddress, inboxTree.ChainId)
 
 	// Get the current root from the database (which may be out of date)
 	row := db.QueryRowContext(ctx, `SELECT current_root FROM trees
 		WHERE chain_id = ? AND contract_address = ? AND token_address = ?`,
-		inboxTree.ChainId, inboxTree.SuckerAddress, inboxTree.TokenAddress)
+		inboxTree.ChainId.String(), inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String())
 
 	var dbRoot string
 	if err := row.Scan(&dbRoot); err != nil && err != sql.ErrNoRows {
@@ -211,11 +211,10 @@ func dbClaims(ctx context.Context, beneficiary common.Address, inboxTree InboxTr
 		}
 	}
 
-	// Get the leaves to build the tree and claims
-	rows, err := db.QueryContext(ctx, `SELECT leaf_hash, index, beneficiary, project_token_amount, terminal_token_amount
+	rows, err := db.QueryContext(ctx, `SELECT leaf_hash, leaf_index, leaf_beneficiary, leaf_project_token_amount, leaf_terminal_token_amount
 		FROM leaves WHERE chain_id = ? AND contract_address = ? AND token_address = ?
-		ORDER BY index ASC`,
-		inboxTree.ChainId, inboxTree.SuckerAddress, inboxTree.TokenAddress)
+		ORDER BY leaf_index ASC`,
+		inboxTree.ChainId.String(), inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String())
 	if err != nil {
 		// Note: this includes sql.ErrNoRows
 		return nil, fmt.Errorf("failed to read leaves for %s from the database: %v", logDescription, err)
@@ -242,11 +241,12 @@ func dbClaims(ctx context.Context, beneficiary common.Address, inboxTree InboxTr
 		leaves = append(leaves, h)
 
 		// Check if the leaf is for the beneficiary we're looking for, and if so, add it to the claims
-		b, err := hex.DecodeString(leafBeneficiary)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode leaf beneficiary %s for %s: %v", leafBeneficiary, logDescription, err)
+		if !common.IsHexAddress(leafBeneficiary) {
+			return nil, fmt.Errorf("db leaf beneficiary %s is not a valid address for %s", leafBeneficiary, logDescription)
 		}
-		if bytes.Equal(b, beneficiary.Bytes()) {
+		b := common.HexToAddress(leafBeneficiary)
+
+		if beneficiary.Cmp(b) == 0 {
 			idx, success := big.NewInt(0).SetString(index, 10)
 			if !success {
 				return nil, fmt.Errorf("failed to parse index %s for %s: %v", index, logDescription, err)
@@ -313,8 +313,8 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	// Get the latest leaf hash for the tree from the db
 	row := db.QueryRowContext(ctx, `SELECT leaf_hash FROM leaves
 		WHERE chain_id = ? AND contract_address = ? AND token_address = ?
-		ORDER BY index DESC LIMIT 1`,
-		inboxTree.ChainId, inboxTree.SuckerAddress, inboxTree.TokenAddress)
+		ORDER BY leaf_index DESC LIMIT 1`,
+		inboxTree.ChainId.String(), inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String())
 
 	var latestHash string
 	err := row.Scan(&latestHash)
@@ -439,8 +439,8 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	}
 
 	stmt, err := tx.PrepareContext(ctx, `INSERT INTO leaves 
-		(chain_id, contract_address, token_address, index, beneficiary,
-		project_token_amount, terminal_token_amount, leaf_hash, is_claimed)
+		(chain_id, contract_address, token_address, leaf_index, leaf_beneficiary,
+		leaf_project_token_amount, leaf_terminal_token_amount, leaf_hash, is_claimed)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare sqlite statement: %v", err)
@@ -458,8 +458,11 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	}
 
 	// Update the inbox tree root
-	tx.ExecContext(ctx, `INSERT OR REPLACE INTO trees (chain_id, contract_address, token_address, current_root) VALUES (?, ?, ?, ?)`,
-		inboxTree.ChainId, inboxTree.SuckerAddress, inboxTree.TokenAddress, hex.EncodeToString(inboxTree.Root[:]))
+	if _, err = tx.ExecContext(ctx, `INSERT OR REPLACE INTO trees(chain_id, contract_address, token_address, current_root) VALUES (?, ?, ?, ?)`,
+		inboxTree.ChainId.String(), inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String(), hex.EncodeToString(inboxTree.Root[:])); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to update inbox tree root for %s: %v", logDescription, err)
+	}
 
 	// Commit the transaction
 	if err := tx.Commit(); err != nil {

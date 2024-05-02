@@ -22,7 +22,7 @@ func initDb() error {
 
 	// These are the inbox trees for each sucker. The leaves are read from the peer sucker.
 	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS trees (
-		chain_id INTEGER,
+		chain_id TEXT,
 		contract_address TEXT,
 		token_address TEXT,	
 		current_root TEXT,
@@ -34,16 +34,16 @@ func initDb() error {
 	// Leaves are associated with their inbox tree, not outbox trees.
 	// Claimed is a boolean
 	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS leaves (
-		chain_id INTEGER,
+		chain_id TEXT,
 		contract_address TEXT,
 		token_address TEXT,
-		index TEXT,
-		beneficiary TEXT,
-		project_token_amount TEXT,
-		terminal_token_amount TEXT,
+		leaf_index TEXT,
+		leaf_beneficiary TEXT,
+		leaf_project_token_amount TEXT,
+		leaf_terminal_token_amount TEXT,
 		leaf_hash TEXT,
 		is_claimed INTEGER,
-		PRIMARY KEY (chain_id, contract_address, token_address, index)
+		PRIMARY KEY (chain_id, contract_address, token_address, leaf_index)
 	);`); err != nil {
 		return err
 	}
