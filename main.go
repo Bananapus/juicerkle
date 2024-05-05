@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -211,7 +212,13 @@ func dbClaims(ctx context.Context, beneficiary common.Address, inboxTree InboxTr
 		}
 	}
 
-	rows, err := db.QueryContext(ctx, `SELECT leaf_hash, leaf_index, leaf_beneficiary, leaf_project_token_amount, leaf_terminal_token_amount
+	// Update the database with the latest claims for this inbox tree.
+	if err := updateClaims(ctx, inboxTree); err != nil {
+		return nil, fmt.Errorf("failed to update claims for %s: %v", logDescription, err)
+	}
+
+	rows, err := db.QueryContext(ctx, `SELECT leaf_hash, leaf_index, leaf_beneficiary,
+		leaf_project_token_amount, leaf_terminal_token_amount, is_claimed
 		FROM leaves WHERE chain_id = ? AND contract_address = ? AND token_address = ?
 		ORDER BY leaf_index ASC`,
 		inboxTree.ChainId.String(), inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String())
@@ -228,7 +235,8 @@ func dbClaims(ctx context.Context, beneficiary common.Address, inboxTree InboxTr
 	defer rows.Close()
 	for rows.Next() {
 		var leafHash, index, leafBeneficiary, projectTokenAmount, terminalTokenAmount string
-		err := rows.Scan(&leafHash, &index, &leafBeneficiary, &projectTokenAmount, &terminalTokenAmount)
+		var isClaimed bool
+		err := rows.Scan(&leafHash, &index, &leafBeneficiary, &projectTokenAmount, &terminalTokenAmount, &isClaimed)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan leaf hash %s for %s: %v", leafHash, logDescription, err)
 		}
@@ -239,6 +247,11 @@ func dbClaims(ctx context.Context, beneficiary common.Address, inboxTree InboxTr
 		}
 
 		leaves = append(leaves, h)
+
+		// If this leaf has already been claimed, move on.
+		if isClaimed {
+			continue
+		}
 
 		// Check if the leaf is for the beneficiary we're looking for, and if so, add it to the claims
 		if !common.IsHexAddress(leafBeneficiary) {
@@ -306,7 +319,7 @@ func dbClaims(ctx context.Context, beneficiary common.Address, inboxTree InboxTr
 // Update the leaves in the database for a specific inbox tree
 func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	logDescription := fmt.Sprintf("inbox %s of sucker %s on chain %s",
-		inboxTree.SuckerAddress, inboxTree.TokenAddress, inboxTree.ChainId)
+		inboxTree.TokenAddress, inboxTree.SuckerAddress, inboxTree.ChainId)
 
 	client := clients[inboxTree.ChainId.String()] // chain was checked in the handler function
 
@@ -460,10 +473,88 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	}
 
 	// Update the inbox tree root
-	if _, err = tx.ExecContext(ctx, `INSERT OR REPLACE INTO trees(chain_id, contract_address, token_address, current_root) VALUES (?, ?, ?, ?)`,
-		inboxTree.ChainId.String(), inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String(), hex.EncodeToString(inboxTree.Root[:])); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT OR REPLACE INTO trees(chain_id, contract_address, token_address, current_root, block_claims_last_updated)
+		VALUES (?, ?, ?, ?, ?)`,
+		inboxTree.ChainId.String(), inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String(), hex.EncodeToString(inboxTree.Root[:]), "0"); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("failed to update inbox tree root for %s: %v", logDescription, err)
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit sqlite transaction for %s: %v", logDescription, err)
+	}
+
+	return nil
+}
+
+// Updates the database with the latest claims for a specific inbox tree.
+func updateClaims(ctx context.Context, inboxTree InboxTree) error {
+	logDescription := fmt.Sprintf("inbox %s of sucker %s on chain %s",
+		inboxTree.TokenAddress, inboxTree.SuckerAddress, inboxTree.ChainId)
+
+	// Read the latest block that we've checked for claims in from the db.
+	row := db.QueryRowContext(ctx, `SELECT block_claims_last_updated FROM trees
+		WHERE chain_id = ? AND contract_address = ? AND token_address = ?`,
+		inboxTree.ChainId.String(), inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String())
+
+	var lastUpdatedBlock string
+	err := row.Scan(&lastUpdatedBlock)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("failed to query block_claims_last_updated from database for %s: %v", logDescription, err)
+	}
+	if err == sql.ErrNoRows {
+		lastUpdatedBlock = "0"
+	}
+	startBlock, err := strconv.ParseUint(lastUpdatedBlock, 10, 64)
+	if err != nil {
+		return fmt.Errorf("failed to parse last updated block %s for %s: %v", lastUpdatedBlock, logDescription, err)
+	}
+
+	// Get the sucker and an iterator for Claimed events.
+	client := clients[inboxTree.ChainId.String()]
+	sucker, err := NewBPSucker(inboxTree.SuckerAddress, client)
+	if err != nil {
+		return fmt.Errorf("failed to instantiate local sucker contract for %s: %v", logDescription, err)
+	}
+	claimIterator, err := sucker.FilterClaimed(&bind.FilterOpts{Context: ctx, Start: startBlock})
+	if err != nil {
+		return fmt.Errorf("failed to instantiate Claimed iterator for %s: %v", logDescription, err)
+	}
+	defer claimIterator.Close()
+
+	// Iterate through the claimed events and update the leaves in the db accordingly
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to start sqlite transaction for %s: %v", logDescription, err)
+	}
+
+	for claimIterator.Next() {
+		// If this event is for a different inbox tree, skip it
+		if claimIterator.Event.Token.Cmp(inboxTree.TokenAddress) != 0 {
+			continue
+		}
+
+		_, err := tx.ExecContext(ctx, `UPDATE leaves SET is_claimed = 1
+			WHERE chain_id = ? AND contract_address = ? AND token_address = ? AND leaf_index = ?`,
+			inboxTree.ChainId.String(), inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String(), claimIterator.Event.Index.String())
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed while executing update sqlite transaction for %s: %v", logDescription, err)
+		}
+	}
+	if err := claimIterator.Error(); err != nil {
+		return fmt.Errorf("failed while iterating through claimed events for %s: %v", logDescription, err)
+	}
+
+	// Update the last block that we've checked for claims in
+	tx.ExecContext(ctx, `UPDATE trees SET block_claims_last_updated = ?
+		WHERE chain_id = ? AND contract_address = ? AND token_address = ?`,
+		strconv.FormatUint(claimIterator.Event.Raw.BlockNumber, 10),
+		inboxTree.ChainId.String(), inboxTree.SuckerAddress.String(), inboxTree.TokenAddress.String())
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed while updating block_claims_last_updated for %s: %v", logDescription, err)
 	}
 
 	// Commit the transaction

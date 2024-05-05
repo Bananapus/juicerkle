@@ -26,6 +26,7 @@ func initDb() error {
 		contract_address TEXT,
 		token_address TEXT,	
 		current_root TEXT,
+		block_claims_last_updated TEXT,
 		PRIMARY KEY (chain_id, contract_address, token_address)
 	);`); err != nil {
 		return err
