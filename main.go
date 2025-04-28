@@ -132,9 +132,9 @@ func claims(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	localSucker, err := NewBPSucker(toClaim.Sucker, client)
+	localSucker, err := NewJBSucker(toClaim.Sucker, client)
 	if err != nil {
-		errStr := fmt.Sprintf("Failed to instantiate a BPSucker for %s: %v", logDescription, err)
+		errStr := fmt.Sprintf("Failed to instantiate a JBSucker for %s: %v", logDescription, err)
 		log.Println(errStr)
 		http.Error(w, errStr, http.StatusInternalServerError)
 		return
@@ -142,7 +142,7 @@ func claims(w http.ResponseWriter, req *http.Request) {
 
 	// callOpts with our context
 	callOpts := &bind.CallOpts{Context: ctx}
-	localInboxTree, err := localSucker.Inbox(callOpts, toClaim.Token)
+	localInboxTree, err := localSucker.InboxOf(callOpts, toClaim.Token)
 	if err != nil {
 		errStr := fmt.Sprintf("Failed to get inbox tree root for %s: %v", logDescription, err)
 		log.Println(errStr)
@@ -185,7 +185,7 @@ func claims(w http.ResponseWriter, req *http.Request) {
 
 // Get the currently available BPClaims for a beneficiary from the database.
 // If the database is out of date for the given inbox tree, update it.
-func dbClaims(ctx context.Context, beneficiary common.Address, inboxTree InboxTree) ([]BPClaim, error) {
+func dbClaims(ctx context.Context, beneficiary common.Address, inboxTree InboxTree) ([]JBClaim, error) {
 	logDescription := fmt.Sprintf("inbox %s of sucker %s on chain %s",
 		inboxTree.TokenAddress, inboxTree.SuckerAddress, inboxTree.ChainId)
 
@@ -228,7 +228,7 @@ func dbClaims(ctx context.Context, beneficiary common.Address, inboxTree InboxTr
 	}
 
 	// Build the tree and claims from the database leaves
-	claims := make([]BPClaim, 0)
+	claims := make([]JBClaim, 0)
 	leaves := make([][]byte, 0)
 
 	// TODO: Check whether the leaf has already been claimed.
@@ -273,12 +273,12 @@ func dbClaims(ctx context.Context, beneficiary common.Address, inboxTree InboxTr
 				return nil, fmt.Errorf("failed to parse terminalTokenAmount %s for %s: %v", terminalTokenAmount, logDescription, err)
 			}
 
-			claims = append(claims, BPClaim{
+			claims = append(claims, JBClaim{
 				Token: inboxTree.TokenAddress,
-				Leaf: BPLeaf{
+				Leaf: JBLeaf{
 					Index:               idx,
 					Beneficiary:         beneficiary,
-					ProjectTokenAmount:  pt,
+					ProjectTokenCount:   pt,
 					TerminalTokenAmount: tt,
 				},
 			})
@@ -347,7 +347,7 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	}
 
 	// Instantiate the local sucker
-	localSucker, err := NewBPSucker(inboxTree.SuckerAddress, client)
+	localSucker, err := NewJBSucker(inboxTree.SuckerAddress, client)
 	if err != nil {
 		return fmt.Errorf("failed to instantiate the sucker contract for %s: %v", logDescription, err)
 	}
@@ -356,11 +356,11 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	// We need to read the InsertToOutboxTree events from the peer sucker.
 	// First, get the peer sucker's chain ID and address.
 	callOpts := &bind.CallOpts{Context: ctx}
-	peerSuckerChainId, err := localSucker.PeerChainID(callOpts)
+	peerSuckerChainId, err := localSucker.PeerChainId(callOpts)
 	if err != nil {
 		return fmt.Errorf("failed to get peer chain ID for %s: %v", logDescription, err)
 	}
-	peerSuckerAddr, err := localSucker.PEER(callOpts)
+	peerSuckerAddr, err := localSucker.Peer(callOpts)
 	if err != nil {
 		return fmt.Errorf("failed to get peer address for %s: %v", logDescription, err)
 	}
@@ -370,7 +370,7 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	}
 
 	// Instantiate the peer sucker
-	peerSucker, err := NewBPSucker(peerSuckerAddr, peerClient)
+	peerSucker, err := NewJBSucker(peerSuckerAddr, peerClient)
 	if err != nil {
 		return fmt.Errorf("failed to instantiate the peer sucker at %s on chain %d for %s: %v", peerSuckerAddr, peerSuckerChainId, logDescription, err)
 	}
@@ -379,7 +379,7 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	logDescription += fmt.Sprintf(" with peer sucker %s on chain %d", peerSuckerAddr, peerSuckerChainId)
 
 	// Make sure the peers match
-	peerAddressOfPeerSucker, err := peerSucker.PEER(callOpts)
+	peerAddressOfPeerSucker, err := peerSucker.Peer(callOpts)
 	if err != nil {
 		return fmt.Errorf("failed to get peer address of peer sucker: %v", err)
 	}
@@ -409,7 +409,7 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 	for outboxIterator.Next() {
 		// TODO: Remove this once we know it's working
 		log.Printf("Leaf index: %s; project token amount: %s; terminal token amount: %s",
-			outboxIterator.Event.Index.String(), outboxIterator.Event.ProjectTokenAmount.String(), outboxIterator.Event.TerminalTokenAmount.String())
+			outboxIterator.Event.Index.String(), outboxIterator.Event.ProjectTokenCount.String(), outboxIterator.Event.TerminalTokenAmount.String())
 
 		// Keep skipping until we pass the latest hash
 		if !seenLatestDbLeaf {
@@ -427,7 +427,7 @@ func updateLeaves(ctx context.Context, inboxTree InboxTree) error {
 			TokenAddress:        inboxTree.TokenAddress.String(),
 			Index:               outboxIterator.Event.Index.String(),
 			Beneficiary:         outboxIterator.Event.Beneficiary.String(),
-			ProjectTokenAmount:  outboxIterator.Event.ProjectTokenAmount.String(),
+			ProjectTokenAmount:  outboxIterator.Event.ProjectTokenCount.String(),
 			TerminalTokenAmount: outboxIterator.Event.TerminalTokenAmount.String(),
 			LeafHash:            hex.EncodeToString(outboxIterator.Event.Hashed[:]),
 			IsClaimed:           false,
@@ -513,7 +513,7 @@ func updateClaims(ctx context.Context, inboxTree InboxTree) error {
 
 	// Get the sucker and an iterator for Claimed events.
 	client := clients[inboxTree.ChainId.String()]
-	sucker, err := NewBPSucker(inboxTree.SuckerAddress, client)
+	sucker, err := NewJBSucker(inboxTree.SuckerAddress, client)
 	if err != nil {
 		return fmt.Errorf("failed to instantiate local sucker contract for %s: %v", logDescription, err)
 	}
